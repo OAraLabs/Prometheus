@@ -129,12 +129,12 @@ def test_an_empty_name_is_never_advertised():
 
 
 HELLO = {"v": "0.9.7", "name": "Will's Mac mini", "agent": "Prometheus", "fp": "3fa9c1e07b2d4a68",
-         "pair": "approve", "tls": False}
+         "pair": "approve", "tls": False, "ic": 2}
 
 
 def test_the_txt_record_is_hello_and_nothing_else():
     props = txt_properties(HELLO)
-    assert set(props) == {"v", "name", "agent", "fp", "pair", "tls"}
+    assert set(props) == {"v", "name", "agent", "fp", "pair", "tls", "ic"}
     assert props["tls"] == b"0" and props["fp"] == b"3fa9c1e07b2d4a68" and props["name"] == b"Will's Mac mini"
     assert all(isinstance(v, bytes) for v in props.values())
 

@@ -191,6 +191,9 @@ def round_zero(reach):
 #: Results the LOOP writes instead of running the tool (agent_loop.py's own
 #: ToolResultBlocks and the adapter's retry prompt). A tool that ran and failed
 #: ("Tool X raised an exception", its own error text) did run.
+# Tools whose every write needs the owner's own approval, whatever the permission mode (BaseTool.requires_owner_approval).
+_OWNER_APPROVED_TOOLS = frozenset({"memory"})
+
 _REFUSED = ("Unknown tool:", "Invalid input for ", "Permission denied for ", "pre_tool_use hook blocked",
             "No tool registry configured", "chat-template markup", "NOT EXECUTED",
             "Your tool call for ", "Giving up on ")
@@ -264,6 +267,10 @@ def test_access_tool_is_found_called_run_and_its_result_reaches_the_client(reach
     mine = [p for p in ends if p.get("tool_name") == tool]
     assert mine, f"{tool}: called, but the client received no result"
     result = mine[-1].get("result") or ""
+    if tool in _OWNER_APPROVED_TOOLS:
+        # Reached and ruled on: it waits for the owner, and this daemon has no one to ask (GHSA-f68r-xfv4-83fr).
+        assert result.startswith(f"Permission denied for {tool}"), f"{tool}: ran without the owner: {result[:200]!r}"
+        return
     assert not any(r in result[:300] for r in _REFUSED), f"{tool}: dispatched but not run: {result[:200]!r}"
     assert turn.selects() <= 1, f"{tool}: {turn.selects()} tool_search selects in one turn"
 

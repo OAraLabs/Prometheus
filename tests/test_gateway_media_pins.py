@@ -73,8 +73,14 @@ def _fake_tool_cls(recorder: dict, result: _FakeToolResult | Exception):
 
 class TestDescribeImagePins:
     @pytest.mark.asyncio
-    async def test_describe_image_success_pin(self, monkeypatch):
+    async def test_describe_image_success_pin(self, monkeypatch, tmp_path):
         import prometheus.tools.builtin.vision as vision_mod
+        from prometheus.gateway.media_cache import image_cache_dir
+
+        # A stored upload, in the media cache: vision reads nothing else (GHSA-v65x-3634-7pcm).
+        monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(tmp_path / "config"))
+        img = image_cache_dir() / "img_abc.jpg"
+        img.write_bytes(b"jpegbytes")
 
         rec: dict = {}
         monkeypatch.setattr(
@@ -82,10 +88,10 @@ class TestDescribeImagePins:
             _fake_tool_cls(rec, _FakeToolResult("a red fox on snow")),
         )
         adapter = _make_adapter()
-        out = await adapter._describe_image("/tmp/img_abc.jpg")
+        out = await adapter._describe_image(str(img))
         assert out == "a red fox on snow"
         # Exact question string + image path forwarded to VisionInput.
-        assert rec["input"].image_path == "/tmp/img_abc.jpg"
+        assert rec["input"].image_path == str(img)
         assert rec["input"].question == "Describe this image in detail."
         # The agent loop's provider rides along for multimodal routing.
         assert rec["context"].metadata["provider"] is adapter.agent_loop._provider
@@ -246,7 +252,8 @@ class TestPhotoFlowPin:
             vision_mod, "VisionTool",
             _fake_tool_cls(rec, _FakeToolResult("a whiteboard diagram")),
         )
-        cached = tmp_path / "img_pin.jpg"
+        monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(tmp_path / "config"))
+        cached = mc.image_cache_dir() / "img_pin.jpg"  # where an upload is stored (GHSA-v65x-3634-7pcm)
         cached.write_bytes(b"jpegbytes")
         monkeypatch.setattr(
             mc, "cache_image_from_bytes", lambda data, ext=".jpg": str(cached),

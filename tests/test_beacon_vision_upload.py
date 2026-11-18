@@ -72,8 +72,12 @@ class StubProvider:
 
 
 @pytest.fixture
-def image(tmp_path: Path) -> str:
-    p = tmp_path / "upload.png"
+def image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    # Stored where an upload is: the bridge describes only a picture in the media cache (GHSA-v65x-3634-7pcm).
+    monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(tmp_path / "config"))
+    from prometheus.gateway.media_cache import image_cache_dir
+
+    p = image_cache_dir() / "upload.png"
     p.write_bytes(_RED_PIXEL_PNG)
     return str(p)
 

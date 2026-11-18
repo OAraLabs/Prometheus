@@ -11,6 +11,13 @@ from pydantic import BaseModel, Field
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolRegistry, ToolResult
 
 
+def _permitted(tool_name: str) -> bool:
+    """Whether the run's profile lets it call *tool_name* (always, for a run no profile limits)."""
+    from prometheus.config.profiles import current_run_profile, profile_permits
+
+    return profile_permits(current_run_profile(), tool_name)
+
+
 # ---------------------------------------------------------------------------
 # Inline Levenshtein (avoids circular imports from adapter/validator)
 # ---------------------------------------------------------------------------
@@ -199,11 +206,11 @@ class ToolSearchTool(BaseTool):
         Two candidates resolve nothing. A miss lists the 5 closest names."""
         assert self._registry is not None
         tool = self._registry.get(name)
-        if tool is not None:
+        if tool is not None and _permitted(tool.name):
             return self._tool_schema(tool)
 
-        # Check skills
-        if self._skill_registry is not None:
+        # Check skills (a run whose profile does not permit the skill tool is not shown the skill catalogue)
+        if self._skill_registry is not None and _permitted("skill"):
             skill = self._skill_registry.get(name)
             if skill is not None:
                 return ToolResult(output=json.dumps({
@@ -237,13 +244,19 @@ class ToolSearchTool(BaseTool):
             result["resolved_from"] = resolved_from
         return ToolResult(output=json.dumps(result, indent=2))
 
+    def _visible_tools(self) -> list[BaseTool]:
+        """The registry's tools the run's profile lets it call: a restricted run is not shown, by name or input
+        schema, a tool it would be refused."""
+        assert self._registry is not None
+        return [t for t in self._registry.list_tools() if _permitted(t.name)]
+
     def _near_miss(self, query: str) -> BaseTool | None:
         """The one tool a near-miss *query* names (see :meth:`_handle_select`)."""
         assert self._registry is not None
         words = _name_words(query)
         if not words:
             return None
-        hits = [(len(run), t) for t in self._registry.list_tools()
+        hits = [(len(run), t) for t in self._visible_tools()
                 if (run := _name_words(t.name)) and _contains_run(words, run)]
         if not hits:
             return None
@@ -256,8 +269,8 @@ class ToolSearchTool(BaseTool):
         tool and skill (all of them came to ~1,700 tokens)."""
         assert self._registry is not None
         q = query.lower()
-        scored = [(self._score_tool(t, q), t.name) for t in self._registry.list_tools()]
-        if self._skill_registry is not None:
+        scored = [(self._score_tool(t, q), t.name) for t in self._visible_tools()]
+        if self._skill_registry is not None and _permitted("skill"):
             scored += [(self._score_skill(s, q), f"[skill] {s.name}") for s in self._skill_registry.list_skills()
                        if skill_match_score(query, s.name, s.description) >= SKILL_MIN_MATCH]
         return [n for _, n in sorted(scored)[:limit]]
@@ -265,7 +278,7 @@ class ToolSearchTool(BaseTool):
     def _handle_search(self, query: str) -> ToolResult:
         """Fuzzy search across tool names, descriptions, AND skill names/descriptions."""
         assert self._registry is not None
-        tools = self._registry.list_tools()
+        tools = self._visible_tools()
         # tools.deferred_loading.search_mcp (reader wired by mcp.bootstrap,
         # which is the only place the tools config and this instance meet):
         # false hides MCP tools from search results — select-by-exact-name
@@ -278,7 +291,7 @@ class ToolSearchTool(BaseTool):
         if not query.strip():
             names = sorted(t.name for t in tools)
             result: dict[str, Any] = {"tools": names}
-            if self._skill_registry is not None:
+            if self._skill_registry is not None and _permitted("skill"):
                 result["skills"] = sorted(s.name for s in self._skill_registry.list_skills())
             return ToolResult(output=json.dumps(result, indent=2))
 
@@ -295,7 +308,7 @@ class ToolSearchTool(BaseTool):
 
         # Score skills — only those that actually match the query (SKILL_MIN_MATCH);
         # edit distance alone never lists one.
-        if self._skill_registry is not None:
+        if self._skill_registry is not None and _permitted("skill"):
             for skill in self._skill_registry.list_skills():
                 if skill_match_score(query, skill.name, skill.description) < SKILL_MIN_MATCH:
                     continue

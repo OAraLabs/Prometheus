@@ -104,12 +104,6 @@
   "home/.prometheus/.daemon_started": {
    "replaced": "<boot-specific>"
   },
-  "home/.prometheus/MEMORY.md": {
-   "text": ""
-  },
-  "home/.prometheus/USER.md": {
-   "text": ""
-  },
   "home/.prometheus/checkpoints/blobs/5c/5c70a535cb206a5c5e9e59e03bc13c5d4c1f1063d95f00255942871c4ad12f8d": {
    "text": "# Project Atlas\n\nThis is a synthetic test project used by the Prometheus parity harness.\n\n- The project codename is ATLAS-7.\n- When you report a count from data.txt, call it \"the tally\".\n"
   },

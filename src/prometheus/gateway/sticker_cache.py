@@ -71,7 +71,9 @@ def cache_sticker_description(
 
 
 def build_sticker_injection(description: str, emoji: str = "", set_name: str = "") -> str:
-    """Build the text injection for a described sticker."""
+    """Build the text injection for a described sticker (escaped, so the memory extractor can take it out)."""
+    from prometheus.utils.file_extract import attachment_note
+
     parts = []
     if emoji:
         parts.append(emoji)
@@ -79,12 +81,14 @@ def build_sticker_injection(description: str, emoji: str = "", set_name: str = "
         parts.append(f'from "{set_name}"')
     prefix = " ".join(parts)
     if prefix:
-        return f'[The user sent a sticker {prefix}. It shows: "{description}"]'
-    return f'[The user sent a sticker. It shows: "{description}"]'
+        return attachment_note(f'The user sent a sticker {prefix}. It shows: "{description}"')
+    return attachment_note(f'The user sent a sticker. It shows: "{description}"')
 
 
 def build_animated_sticker_injection(emoji: str = "") -> str:
     """Fallback injection for animated/video stickers that can't be analyzed."""
+    from prometheus.utils.file_extract import attachment_note
+
     if emoji:
-        return f"[The user sent an animated sticker: {emoji}]"
+        return attachment_note(f"The user sent an animated sticker: {emoji}")
     return "[The user sent an animated sticker]"

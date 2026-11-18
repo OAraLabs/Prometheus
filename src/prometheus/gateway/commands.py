@@ -2725,6 +2725,7 @@ async def approve_detail(
         from prometheus.permissions.approval_queue import (
             is_desktop_request,
             is_hold_request,
+            is_private_request,
             is_worker_request,
         )
 
@@ -2733,9 +2734,10 @@ async def approve_detail(
         # or "Click 'Send'" sight unseen; each is answered on its own. Nor is a
         # spawned WORKER's request: it asks for the worker, whose arguments
         # the operator has not seen (#720). Nor is lifting a device's hold:
-        # it widens what that device may run, so it is read on its own.
+        # it widens what that device may run, so it is read on its own. Nor is a change to what the agent
+        # remembers: the owner reads the entry it will write (GHSA-f68r-xfv4-83fr).
         def _alone(a: Any) -> bool:
-            return is_desktop_request(a) or is_worker_request(a) or is_hold_request(a)
+            return is_desktop_request(a) or is_worker_request(a) or is_hold_request(a) or is_private_request(a)
 
         skipped = [a for a in pending if _alone(a)]
         approved: list[str] = []

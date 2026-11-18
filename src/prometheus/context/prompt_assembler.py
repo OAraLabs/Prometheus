@@ -64,6 +64,62 @@ def _load_bootstrap_file(filename: str) -> str | None:
         return None
 
 
+#: What a held run is told when its profile names no bootstrap file that exists. Neutral on purpose: it names no
+#: machine, owner, path or fact, and the run's tools are the profile's alone.
+HELD_DEFAULT_INSTRUCTIONS = (
+    "You are an assistant working under a restricted profile. Use only the tools you are given; a tool you "
+    "were not given is not available to you. You have no knowledge of the machine you run on, its owner or "
+    "its files beyond what a tool you were given returns."
+)
+
+
+def held_system_prompt(profile: object, client_instructions: str = "") -> str:
+    """The system prompt of a run the operator HOLDS to *profile*.
+
+    The files the profile itself names in ``bootstrap_files`` (its own instruction file, and the persona or the
+    machine summary only if it lists them), then what the connecting client sent as instructions on the
+    OpenAI-compatible route. A neutral line when the profile names no file that exists. NOTHING else of the
+    owner's prompt: the daemon's one boot-time prompt carries the owner's persona and instructions, the machine
+    and network summary, the "# Memory" section and the workspace's project files, and a restricted caller is
+    not the owner. A profile that did not name its bootstrap files (``bootstrap_declared`` false) names none.
+    """
+    sections: list[str] = []
+    if getattr(profile, "bootstrap_declared", False):
+        files = getattr(profile, "bootstrap_files", None) or []
+        if isinstance(files, str):          # `bootstrap_files: SOUL.md` is one file, not its letters
+            files = [files]
+        for filename in files:
+            # A markdown file directly in the config directory, resolving inside it: a profile cannot point the
+            # prompt at another path, a link out of the folder, or a database or key file.
+            if (not isinstance(filename, str) or not filename.endswith(".md") or filename.startswith(".")
+                    or Path(filename).name != filename):
+                log.warning("held profile %r names an unusable bootstrap file %r; skipped",
+                            getattr(profile, "name", "?"), filename)
+                continue
+            try:
+                config_dir = get_config_dir().resolve()
+                if (config_dir / filename).resolve().parent != config_dir:
+                    log.warning("held profile %r: bootstrap file %r resolves outside the config directory; skipped",
+                                getattr(profile, "name", "?"), filename)
+                    continue
+                content = _load_bootstrap_file(filename)
+            except Exception:
+                log.warning("held profile %r: bootstrap file %r could not be read; skipped",
+                            getattr(profile, "name", "?"), filename, exc_info=True)
+                continue
+            if not content:
+                continue
+            if filename == "ANATOMY.md":
+                sections.append(_infrastructure_block(content, None))
+            else:
+                sections.append(f"<!-- Bootstrap: ~/.prometheus/{filename} -->\n{content}")
+    if not sections:
+        sections.append(HELD_DEFAULT_INSTRUCTIONS)
+    if client_instructions.strip():
+        sections.append(client_instructions.strip())
+    return "\n\n".join(sections)
+
+
 def _load_memory_and_user() -> str:
     """Load MEMORY.md + USER.md content formatted for the system prompt.
 

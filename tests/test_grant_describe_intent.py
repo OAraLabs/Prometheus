@@ -266,8 +266,8 @@ class TestDescribeTouchesNoFilesystem:
                             lambda *a, **k: (_ for _ in ()).throw(AssertionError("stat!")))
         assert "EVERY use of" in Grant(
             kind="tool", value="", tool_name="bash").describe()
-        assert "starting with" in Grant(
-            kind="command_prefix", value="git ", tool_name="bash").describe()
+        assert "exactly" in Grant(
+            kind="command_prefix", value="git status", tool_name="bash").describe()
 
 
 # --------------------------------------------------------------------------- #

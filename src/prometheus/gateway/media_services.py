@@ -41,12 +41,19 @@ async def describe_image(image_path: str, *, provider: Any = None) -> str | None
     ``silent_failures`` telemetry row, so a chronically-broken vision path
     is countable instead of anecdotal.
     """
+    from prometheus.gateway.media_cache import cached_image
     from prometheus.tools.base import ToolExecutionContext
     from prometheus.tools.builtin.vision import VisionInput, VisionTool
 
+    # Only a picture a surface received and stored in the media cache (GHSA-v65x-3634-7pcm), never another path.
+    resolved = cached_image(image_path)
+    if resolved is None:
+        logger.warning("Vision refused %s: it is not a stored upload in the media cache", image_path)
+        return None
     tool = VisionTool()
+    # The resolved path, the one just checked: not the name again, which a link swapped in could redirect.
     arguments = VisionInput(
-        image_path=image_path, question="Describe this image in detail."
+        image_path=str(resolved), question="Describe this image in detail."
     )
     context = ToolExecutionContext(cwd=Path.cwd(), metadata={"provider": provider})
 

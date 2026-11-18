@@ -1082,6 +1082,9 @@ def create_app(
     # A public route (web/public_routes.py), so the bearer gate does not apply and the route does its own
     # checking: no browsers, a per-peer limit, no CORS, no disk writes. Contract: docs/PAIRING-APPROVAL-API.md.
     _hello_limiter = hello_mod.new_limiter()
+    from prometheus.web.identity_challenge import identity_hosts as _identity_hosts_of
+
+    _identity_hosts = _identity_hosts_of(config)
 
     def _hello_payload(tls: bool = False) -> dict[str, Any]:
         """*tls*: whether the port being described speaks TLS (the asked port for the route, the advertised
@@ -1106,12 +1109,21 @@ def create_app(
     async def identity_challenge(request: Request):
         from prometheus.web import identity_challenge as challenge_mod
 
+        from prometheus.web.loopback import local_address
+
         tls = request.url.scheme == "https"
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001 - no body or not JSON: the nonce check refuses it
             body = None
-        return hello_mod.guarded_response(request, _hello_limiter, lambda: challenge_mod.answer(body, tls=tls))
+        # v2 (GHSA-75cg-fxc2-f93j) binds the host the client dialled: the Host header exactly as received (one of
+        # them, never X-Forwarded-Host) and the local address the connection arrived on.
+        hosts = [v for k, v in request.scope.get("headers") or () if k.lower() == b"host"]
+        host_header = hosts[0].decode("latin-1") if len(hosts) == 1 else None
+        return hello_mod.guarded_response(
+            request, _hello_limiter,
+            lambda: challenge_mod.answer(body, tls=tls, host_header=host_header, local_ip=local_address(request),
+                                         extra_hosts=_identity_hosts))
 
     # ── Root ────────────────────────────────────────────────────────
 
@@ -5622,7 +5634,11 @@ def create_app(
         # its next tick, so AutoDream pauses. Never raises.
         activity.note_user_activity()
         outcomes.note_user_message(f"web:{session_id}", content)
-        session.add_user_message(content)
+        # A scoped device is not the owner: its message is marked as its own, so it teaches nothing.
+        from prometheus.engine.messages import SCOPED_DEVICE_AUTHOR
+        _identity = getattr(request.state, "device_identity", None)
+        _scoped = _identity is not None and not getattr(_identity, "is_operator", False)
+        session.add_user_message(content, **({"author": SCOPED_DEVICE_AUTHOR} if _scoped else {}))
         # pre_len AFTER the user append — the index in result.messages where
         # the loop's new content starts, same as every gateway adapter. The
         # old ``len(...) - 1`` here re-included the user turn: re-appended in
