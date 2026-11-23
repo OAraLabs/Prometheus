@@ -1082,6 +1082,7 @@ class WebSocketBridge:
         caps = ["voice_input"] if media_services.voice_input_available(self.config) else []
         caps += ["speech"] if speech_configured(self.config) else []
         caps.append("pause")          # PUT/DELETE /api/pause, `paused` on /api/status (engine/pause.py)
+        caps.append("plans")          # subscription plans on /api/providers/keys (providers/plans.py)
         return [*caps, "projects"]  # chat projects (web/chat_projects_routes.py): always served
 
     async def _system_note(self, session_id: str, content: str) -> None:

@@ -1,0 +1,164 @@
+{
+  "capabilities": {
+    "plans": 1
+  },
+  "workspace_regions": [
+    "ap-southeast-1",
+    "us-east-1",
+    "eu-central-1",
+    "ap-northeast-1",
+    "cn-hongkong",
+    "cn-beijing"
+  ],
+  "services": [
+    {
+      "id": "deepseek",
+      "label": "DeepSeek",
+      "kind": "llm",
+      "env_vars": [
+        {
+          "name": "DEEPSEEK_API_KEY",
+          "set": false
+        }
+      ],
+      "docs_url": "https://platform.deepseek.com/api_keys",
+      "default_model": "deepseek-flash",
+      "plans": [],
+      "plan": null,
+      "endpoint_set": false,
+      "plan_pinned_in_config": false,
+      "warnings": []
+    },
+    {
+      "id": "kimi",
+      "label": "Kimi",
+      "kind": "llm",
+      "env_vars": [
+        {
+          "name": "MOONSHOT_API_KEY",
+          "set": false
+        }
+      ],
+      "docs_url": "https://platform.kimi.ai/",
+      "default_model": "kimi-k2.6",
+      "plans": [
+        {
+          "id": "payg",
+          "label": "Pay as you go",
+          "subscription": false,
+          "terms": null,
+          "default": true,
+          "custom": false,
+          "regions": [],
+          "separate_keys": true,
+          "models": []
+        },
+        {
+          "id": "kimi-code",
+          "label": "Kimi Code",
+          "subscription": true,
+          "terms": "A membership for programming tools; for your own product or unattended work, use pay as you go.",
+          "default": false,
+          "custom": false,
+          "regions": [],
+          "separate_keys": true,
+          "models": [
+            "kimi-for-coding",
+            "kimi-for-coding-highspeed",
+            "k3",
+            "k3-256k"
+          ]
+        }
+      ],
+      "plan": "payg",
+      "endpoint_set": false,
+      "plan_pinned_in_config": false,
+      "warnings": []
+    },
+    {
+      "id": "qwen",
+      "label": "Qwen",
+      "kind": "llm",
+      "env_vars": [
+        {
+          "name": "QWEN_API_KEY",
+          "set": false
+        }
+      ],
+      "docs_url": "https://modelstudio.console.alibabacloud.com/",
+      "default_model": "qwen3.8-max",
+      "plans": [
+        {
+          "id": "payg-intl",
+          "label": "Pay as you go (international)",
+          "subscription": false,
+          "terms": null,
+          "default": true,
+          "custom": false,
+          "regions": [],
+          "separate_keys": true,
+          "models": []
+        },
+        {
+          "id": "payg-us",
+          "label": "Pay as you go (US)",
+          "subscription": false,
+          "terms": null,
+          "default": false,
+          "custom": false,
+          "regions": [],
+          "separate_keys": true,
+          "models": []
+        },
+        {
+          "id": "token-plan",
+          "label": "Token Plan (Singapore)",
+          "subscription": true,
+          "terms": "For interactive coding tools and agents only, not automated scripts, backends or scheduled jobs.",
+          "default": false,
+          "custom": false,
+          "regions": [],
+          "separate_keys": true,
+          "models": []
+        },
+        {
+          "id": "coding-plan",
+          "label": "Coding Plan",
+          "subscription": true,
+          "terms": "For interactive coding tools and agents only, not automated scripts, backends or scheduled jobs.",
+          "default": false,
+          "custom": false,
+          "regions": [],
+          "separate_keys": true,
+          "models": [
+            "qwen3.7-plus",
+            "qwen3.6-plus",
+            "qwen3.5-plus"
+          ]
+        },
+        {
+          "id": "workspace",
+          "label": "Workspace",
+          "subscription": false,
+          "terms": null,
+          "default": false,
+          "custom": true,
+          "regions": [
+            "ap-southeast-1",
+            "us-east-1",
+            "eu-central-1",
+            "ap-northeast-1",
+            "cn-hongkong",
+            "cn-beijing"
+          ],
+          "separate_keys": true,
+          "models": []
+        }
+      ],
+      "plan": "payg-intl",
+      "endpoint_set": false,
+      "plan_pinned_in_config": false,
+      "warnings": []
+    }
+  ]
+}

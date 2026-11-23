@@ -94,31 +94,59 @@ def set_env_value(key: str, value: str, path: Path | None = None) -> Path:
     comments and ordering survive; otherwise the assignment is appended.
     New files are created ``0600`` — this file holds secrets.
     """
+    return set_env_values({key: value}, path)
+
+
+def set_env_values(values: dict[str, str], path: Path | None = None) -> Path:
+    """Set several ``key=value`` assignments in ONE rewrite of the env file.
+
+    For values that only work as a pair (a key and the endpoint it was issued for): one write, so a failure leaves
+    neither changed rather than one. Same rules per key as :func:`set_env_value`.
+    """
     path = path or get_env_file_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
     lines: list[str] = []
-    replaced = False
+    replaced: set[str] = set()
     if path.is_file():
         for raw in path.read_text(encoding="utf-8").splitlines():
             m = _LINE_RE.match(raw)
-            if m and m.group(1) == key and not raw.lstrip().startswith("#"):
-                if not replaced:
-                    lines.append(f"{key}={value}")
-                    replaced = True
+            if m and m.group(1) in values and not raw.lstrip().startswith("#"):
+                key = m.group(1)
+                if key not in replaced:
+                    lines.append(f"{key}={values[key]}")
+                    replaced.add(key)
                 # Drop duplicate assignments of the same key.
                 continue
             lines.append(raw)
-    if not replaced:
-        lines.append(f"{key}={value}")
+    for key, value in values.items():
+        if key not in replaced:
+            lines.append(f"{key}={value}")
 
-    created = not path.exists()
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    if created:
+    # Write a 0600 sibling and rename it over the file: a crash or a full disk mid-write leaves the old file whole,
+    # never a truncated one (this file holds every secret the daemon has). An existing file keeps its own mode.
+    import tempfile
+
+    if path.is_symlink():
+        path = path.resolve()  # write where the link points, as an in-place write did, not over the link
+    mode = (path.stat().st_mode & 0o777) if path.exists() else 0o600
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         try:
-            path.chmod(0o600)
+            os.chmod(tmp_name, mode)
         except OSError:  # pragma: no cover — exotic filesystems
-            logger.warning("could not chmod 600 %s", path)
+            logger.warning("could not chmod %o %s", mode, path)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
     return path
 
 
