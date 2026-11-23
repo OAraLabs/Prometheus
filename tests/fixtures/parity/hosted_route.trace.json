@@ -133,7 +133,7 @@
   {
    "body": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-haiku-4-5-20251001\",\"id\":\"msg_011CfPTJu7XAtgUwV79U7zEF\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"container\":null,\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":348,\"cache_creation_input_tokens\":14735,\"cache_read_input_tokens\":0,\"cache_creation\":{\"ephemeral_5m_input_tokens\":14735,\"ephemeral_1h_input_tokens\":0},\"output_tokens\":1,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"},\"diagnostics\":null} }\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}            }\n\nevent: ping\ndata: {\"type\": \"ping\"}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"I\"}         }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"'m ready to help\"}          }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" you build\"}             }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" great\"}            }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" software\"}               }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" —\"}             }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" I\"} }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" harbor\"}            }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" no\"}        }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" doub\"}            }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ts about that!\"}            }\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" 🚀\"}             }\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0       }\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"stop_details\":null,\"container\":null},\"usage\":{\"input_tokens\":348,\"cache_creation_input_tokens\":14735,\"cache_read_input_tokens\":0,\"output_tokens\":25}        }\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"            }\n\n",
    "content_type": "text/event-stream; charset=utf-8",
-   "fingerprint": "961a0bd9d38c33d1",
+   "fingerprint": "ef68fc4620d94f00",
    "method": "POST",
    "path": "/v1/messages",
    "request": {
@@ -1535,6 +1535,7 @@
         "entry": {
          "anyOf": [
           {
+           "maxLength": 400,
            "type": "string"
           },
           {
@@ -1542,7 +1543,7 @@
           }
          ],
          "default": null,
-         "description": "Entry text for add/remove, or new entry text for replace.",
+         "description": "Entry text for add/remove, or new entry text for replace (at most 400 characters: one fact per entry).",
          "title": "Entry"
         },
         "old_entry": {
@@ -2245,14 +2246,14 @@
  "git_repos": [],
  "recorded": {
   "completions": 4,
-  "date": "2026-10-27",
+  "date": "2026-11-23",
   "models": {
    "completions_by_backend": "{\"hosted\": 1, \"primary\": 3}",
    "hosted": "claude-haiku-4-5-20251001",
    "primary": "Qwen3.8-27B-UD-Q4_K_XL.gguf",
    "primary_server": "llama.cpp b1-9d57ce456"
   },
-  "prometheus_sha": "324872fe533a"
+  "prometheus_sha": "8b5c848e44f9"
  },
  "scenario": "hosted_route",
  "steps": [
