@@ -429,6 +429,9 @@ PRESET_MODEL_CHOICES: dict[str, tuple[str, ...]] = {
         # stays for anyone still pinning it, since the model string is
         # free-form, but it is no longer offered as a choice.
         "qwen3.8-max",
+        # Alibaba's newest flagship (model page, 2026-11-23): offered, not the default, so a box on qwen3.8-max
+        # stays there until its owner picks it. Also on the Token Plan's model list.
+        "qwen4-max",
         "qwen3.8-flash",
         "qwen3.7-plus",
     ),

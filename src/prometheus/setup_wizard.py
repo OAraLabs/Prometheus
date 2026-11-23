@@ -107,6 +107,7 @@ CLOUD_PROVIDER_MODELS: dict[str, list[tuple[str, str, str]]] = {
         # International pay-as-you-go endpoint. The Alibaba subscription plans
         # are different hosts with different keys and are NOT configured here.
         ("qwen3.8-max", "Flagship", "$2/$6 per 1M tokens"),
+        ("qwen4-max", "Newest flagship", "$1.50/$4.50 per 1M tokens"),
         ("qwen3.8-flash", "Fast + cheap", "$0.15/$0.48 per 1M tokens"),
     ],
 }

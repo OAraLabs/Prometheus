@@ -121,6 +121,7 @@ PRICING: dict[str, tuple[float, float]] = {
     # still overrides it to `subscription` when the box is pointed at a plan.
     "qwen3.8-max": (2.00, 6.00),
     "qwen3.8-flash": (0.15, 0.48),
+    "qwen4-max": (1.50, 4.50),                      # help/en/model-studio/qwen4-max, international, read 2026-11-23
     "qwen3.7-max": (2.50, 7.50),                    # superseded by 3.8-max, which is cheaper
 }
 

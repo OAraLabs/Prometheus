@@ -83,6 +83,7 @@ MODEL_OUTPUT_LIMITS: dict[str, ModelOutputLimit] = {
     # thinking has its own budget (and is counted in usage on top of the cap).
     "qwen3.8-max": ModelOutputLimit(16384, 131072),
     "qwen3.8-flash": ModelOutputLimit(16384, 131072),
+    "qwen4-max": ModelOutputLimit(16384, 131072),  # 262,144 in thinking mode, on its own budget
     # xAI publishes no output maximum (500K context; 128,000 when omitted).
     # Reasoning is outside the cap.
     "grok-4.5": ModelOutputLimit(16384, None),
