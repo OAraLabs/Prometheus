@@ -315,7 +315,8 @@ OVERRIDE_PRESETS: dict[str, dict[str, Any]] = {
     "gemini": {
         "provider": "gemini",
         "api_key_env": "GEMINI_API_KEY",
-        "model": "gemini-2.5-flash",
+        # Google's named replacement for gemini-2.5-flash (routed there from 2026-12-01); see CLOUD_DEFAULTS.
+        "model": "gemini-3.5-flash-lite",
     },
     "xai": {
         "provider": "xai",
@@ -413,7 +414,8 @@ PRESET_MODEL_CHOICES: dict[str, tuple[str, ...]] = {
         "gpt-6-astra",
         "gpt-5-nano",
     ),
-    "gemini": ("gemini-2.5-flash", "gemini-2.5-pro"),
+    # The replacements Google names for gemini-2.5-flash and gemini-2.5-pro (deprecations page, read 2026-11-23).
+    "gemini": ("gemini-3.5-flash-lite", "gemini-3.8-flash"),
     "deepseek": ("deepseek-flash", "deepseek-v4-pro"),
     "glm": ("glm-5.3", "glm-5.3-flash", "glm-5.3-flashx"),
     "kimi": (
@@ -873,7 +875,7 @@ def log_slash_command_wiring(
 
         INFO  slash_commands.claude  → anthropic / claude-sonnet-4-5
         INFO  slash_commands.gpt     → openai / gpt-4o
-        INFO  slash_commands.gemini  → gemini / gemini-2.5-flash
+        INFO  slash_commands.gemini  → gemini / gemini-3.5-flash-lite
         INFO  slash_commands.xai     → xai / grok-4.5
 
     This is the diagnostic that makes "why is /claude returning Haiku?"
