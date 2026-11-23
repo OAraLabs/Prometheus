@@ -292,6 +292,16 @@ def billing_stamp_full(
             return "local", None
         host = billing_host_of(provider)
         url = f"//{host}" if host else None
+        # Host and path, transient like the host: a plan that shares its host with pay as you go (the GLM Coding
+        # Plan on api.z.ai) is told apart only by its path. Never the query (Gemini's ``?key=``); only the matched
+        # marker is persisted.
+        raw = getattr(provider, "base_url", None) or getattr(provider, "_base_url", None)
+        if url and isinstance(raw, str):
+            from urllib.parse import urlsplit
+
+            path = urlsplit(raw.strip()).path
+            if path and any(m in f"{url}{path}/" for m in SUBSCRIPTION_HOST_MARKERS):
+                url = f"{url}{path}/"
         mode, _reason_withheld = billing_for(model or "", url)
         marker = matched_subscription_marker(url) if mode == "subscription" else None
         return mode, marker

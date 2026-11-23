@@ -440,15 +440,24 @@ def test_the_routers_own_built_providers_of_that_provider_are_dropped():
 
 
 def test_every_subscription_plan_is_billed_as_a_subscription():
-    from prometheus.telemetry.cost import SUBSCRIPTION_HOST_MARKERS
+    # Through the path a call is recorded by, not just the marker list.
+    from prometheus.telemetry.cost import billing_stamp_full
+
+    class _P:
+        provider_name = "qwen"
+
+        def __init__(self, base_url: str) -> None:
+            self._base_url = base_url
 
     for service_plans in plans.PROVIDER_PLANS.values():
         for plan in service_plans:
             if not plan.endpoint:
                 continue
-            is_sub = any(m in plan.endpoint for m in SUBSCRIPTION_HOST_MARKERS)
-            assert is_sub == (plan.terms == plans.TERMS_INTERACTIVE), plan.id
-
+            model = plan.models[0] if plan.models else "glm-5.3"
+            mode, marker = billing_stamp_full(model, _P(plan.endpoint))
+            assert (mode == "subscription") == (plan.terms == plans.TERMS_INTERACTIVE), (plan.id, mode)
+            if marker:
+                assert "//" not in marker and "?" not in marker
 
 def test_workspace_plan_carries_its_regions_and_every_plan_says_separate_keys():
     qwen = _svc(_client().get("/api/providers/keys"), "qwen")
@@ -478,3 +487,21 @@ def test_error_bodies_never_quote_a_key_or_a_built_host(monkeypatch):
     r = _client({"slash_commands": {"qwen": {"base_url": "https://pinned.example/v1"}}}).put(
         "/api/providers/keys/qwen", json={"values": {"QWEN_API_KEY": QWEN_KEY}, "plan": "payg-us"})
     assert r.status_code == 409 and "pinned.example" not in r.text and WS_ID not in r.text
+
+
+
+def test_env_file_write_is_atomic_and_keeps_0600(monkeypatch):
+    from prometheus.config import env_file
+
+    path = _env_file()
+    env_file.set_env_values({"A_KEY": "one"}, path)
+    assert (path.stat().st_mode & 0o777) == 0o600
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(env_file.os, "replace", boom)
+    with pytest.raises(OSError):
+        env_file.set_env_values({"A_KEY": "two", "B_KEY": "x"}, path)
+    assert parse_env_file(path) == {"A_KEY": "one"}
+    assert [p.name for p in path.parent.iterdir() if p.name.endswith(".tmp")] == []

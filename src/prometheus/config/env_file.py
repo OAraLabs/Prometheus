@@ -123,13 +123,30 @@ def set_env_values(values: dict[str, str], path: Path | None = None) -> Path:
         if key not in replaced:
             lines.append(f"{key}={value}")
 
-    created = not path.exists()
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    if created:
+    # Write a 0600 sibling and rename it over the file: a crash or a full disk mid-write leaves the old file whole,
+    # never a truncated one (this file holds every secret the daemon has). An existing file keeps its own mode.
+    import tempfile
+
+    if path.is_symlink():
+        path = path.resolve()  # write where the link points, as an in-place write did, not over the link
+    mode = (path.stat().st_mode & 0o777) if path.exists() else 0o600
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         try:
-            path.chmod(0o600)
+            os.chmod(tmp_name, mode)
         except OSError:  # pragma: no cover — exotic filesystems
-            logger.warning("could not chmod 600 %s", path)
+            logger.warning("could not chmod %o %s", mode, path)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
     return path
 
 
