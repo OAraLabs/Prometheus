@@ -473,7 +473,16 @@ def resolve_slash_command_target(
     slash_section = cfg.get("slash_commands") or {}
     user_entry = slash_section.get(command_name) or {}
 
+    # A subscription plan with its own models (providers/plans.py) supplies the default model when the user's config
+    # names none: Kimi Code serves `kimi-for-coding`, not the pay-as-you-go default. The plan is read from the
+    # endpoint variable at call time, so a plan saved over REST applies to the next resolution with no restart.
+    from prometheus.providers.plans import active_plan_models
+
+    plan_models = active_plan_models(command_name, cfg)
+
     if not user_entry:
+        if plan_models:
+            return {**default_preset, "model": plan_models[0]}
         if command_name not in _FALLBACK_WARNED:
             _FALLBACK_WARNED.add(command_name)
             log.warning(
@@ -491,6 +500,8 @@ def resolve_slash_command_target(
         resolved["provider"] = user_entry["provider"]
     if user_entry.get("model"):
         resolved["model"] = user_entry["model"]
+    elif plan_models:
+        resolved["model"] = plan_models[0]
     if user_entry.get("api_key_env"):
         resolved["api_key_env"] = user_entry["api_key_env"]
     # base_url is absent from every built-in preset (each provider's default
@@ -808,7 +819,11 @@ def resolve_model_choices(
     elif isinstance(user_models, (list, tuple)) and user_models:
         candidates = [str(m).strip() for m in user_models if str(m).strip()]
     else:
-        candidates = list(PRESET_MODEL_CHOICES.get(command_name, ()))
+        from prometheus.providers.plans import active_plan_models
+
+        # A plan that serves its own models offers those, not the pay-as-you-go list it cannot serve.
+        candidates = list(active_plan_models(command_name, prometheus_config)
+                          or PRESET_MODEL_CHOICES.get(command_name, ()))
 
     ordered = [default_model] if default_model else []
     for model in candidates:
@@ -1026,6 +1041,29 @@ class ModelRouter:
                     "model choice %r for %s could not be stored — it will not survive a restart",
                     stored_key, session_id,
                 )
+
+    def refresh_preset(self, preset: str, prometheus_config: dict[str, Any] | None) -> int:
+        """Rebuild every session choice of *preset* on its next turn, against the key and plan saved now.
+
+        A built override provider holds the key and endpoint it was built with. After ``PUT /api/providers/keys``
+        changes either, each entry whose picker key is this preset (bare or ``preset:model``) is resolved again
+        and its provider dropped, so the next turn builds one against what was just saved. A model the new plan
+        does not serve falls back to the plan's default. Returns how many entries were refreshed.
+        """
+        refreshed = 0
+        for entry in self._overrides.values():
+            if not entry.key or split_model_key(entry.key)[0] != preset:
+                continue
+            target = resolve_model_target(entry.key, prometheus_config) or resolve_slash_command_target(
+                preset, prometheus_config
+            )
+            if target is None:
+                continue
+            entry.provider_config = dict(target)
+            entry.provider = None
+            entry.adapter = None
+            refreshed += 1
+        return refreshed
 
     def clear_override(self, session_id: str, *, persist: bool = True) -> None:
         """Clear the override for one session (called by /local).

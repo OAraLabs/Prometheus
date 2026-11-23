@@ -4,6 +4,8 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## Unreleased
 
+- Models: a chat provider's subscription plan can be chosen with its key. `GET /api/providers/keys` lists each provider's plans from a fixed list in code (Qwen: pay as you go international or US, Token Plan, Coding Plan, your own workspace; GLM: pay as you go, GLM Coding Plan; Kimi: pay as you go, Kimi Code), each with its documented endpoint, a one-line terms note and, where the plan serves its own models, those models. It also says which plan is in use, as an id: a workspace host or an endpoint set by hand is never read back. `PUT /api/providers/keys/{id}` takes `"plan"` (and, for a workspace, an id and a region checked against the one documented host pattern) only together with the key, and writes the endpoint only from the list, so a key cannot be pointed at any other host. A saved plan takes effect without a restart, for conversations already on that provider too. A plan sold for interactive use on a route that runs unattended (the primary model, a fallback, a rule, smart routing, escalation) is a warning at boot and in the route's answer, never a refusal. The contract is `docs/reference/subscription-plans.md`.
+
 ## 0.9.21 (2026-11-17)
 
 ### Security advisories

@@ -1,0 +1,141 @@
+{
+  "plans_version": 1,
+  "workspace_regions": [
+    "ap-southeast-1",
+    "us-east-1",
+    "eu-central-1",
+    "ap-northeast-1",
+    "cn-hongkong",
+    "cn-beijing"
+  ],
+  "services": [
+    {
+      "id": "deepseek",
+      "label": "DeepSeek",
+      "kind": "llm",
+      "env_vars": [
+        {
+          "name": "DEEPSEEK_API_KEY",
+          "set": false
+        }
+      ],
+      "docs_url": "https://platform.deepseek.com/api_keys",
+      "default_model": "deepseek-flash",
+      "plans": [],
+      "plan": null,
+      "endpoint_env": null,
+      "plan_pinned_in_config": false,
+      "warnings": []
+    },
+    {
+      "id": "kimi",
+      "label": "Kimi",
+      "kind": "llm",
+      "env_vars": [
+        {
+          "name": "MOONSHOT_API_KEY",
+          "set": false
+        }
+      ],
+      "docs_url": "https://platform.kimi.ai/",
+      "default_model": "kimi-k2.6",
+      "plans": [
+        {
+          "id": "payg",
+          "label": "Pay as you go",
+          "endpoint": "https://api.moonshot.ai/v1",
+          "terms": "metered",
+          "terms_note": "Ordinary metered API use.",
+          "models": [],
+          "workspace": false
+        },
+        {
+          "id": "kimi-code",
+          "label": "Kimi Code",
+          "endpoint": "https://api.kimi.ai/coding/v1",
+          "terms": "interactive",
+          "terms_note": "A membership for programming tools; for your own product or unattended work, use pay as you go.",
+          "models": [
+            "kimi-for-coding",
+            "kimi-for-coding-highspeed",
+            "k3",
+            "k3-256k"
+          ],
+          "workspace": false
+        }
+      ],
+      "plan": "payg",
+      "endpoint_env": "MOONSHOT_BASE_URL",
+      "plan_pinned_in_config": false,
+      "warnings": []
+    },
+    {
+      "id": "qwen",
+      "label": "Qwen",
+      "kind": "llm",
+      "env_vars": [
+        {
+          "name": "QWEN_API_KEY",
+          "set": false
+        }
+      ],
+      "docs_url": "https://modelstudio.console.alibabacloud.com/",
+      "default_model": "qwen3.8-max",
+      "plans": [
+        {
+          "id": "payg-intl",
+          "label": "Pay as you go (international)",
+          "endpoint": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+          "terms": "metered",
+          "terms_note": "Ordinary metered API use.",
+          "models": [],
+          "workspace": false
+        },
+        {
+          "id": "payg-us",
+          "label": "Pay as you go (US)",
+          "endpoint": "https://dashscope-us.aliyuncs.com/compatible-mode/v1",
+          "terms": "metered",
+          "terms_note": "Ordinary metered API use, served from the US region.",
+          "models": [],
+          "workspace": false
+        },
+        {
+          "id": "token-plan",
+          "label": "Token Plan",
+          "endpoint": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+          "terms": "interactive",
+          "terms_note": "For interactive coding tools and agents only, not automated scripts, backends or scheduled jobs.",
+          "models": [],
+          "workspace": false
+        },
+        {
+          "id": "coding-plan",
+          "label": "Coding Plan",
+          "endpoint": "https://coding-intl.dashscope.aliyuncs.com/v1",
+          "terms": "interactive",
+          "terms_note": "For interactive coding tools and agents only, not automated scripts, backends or scheduled jobs.",
+          "models": [
+            "qwen3.7-plus",
+            "qwen3.6-plus",
+            "qwen3.5-plus"
+          ],
+          "workspace": false
+        },
+        {
+          "id": "workspace",
+          "label": "Workspace",
+          "endpoint": null,
+          "terms": "metered",
+          "terms_note": "Your own workspace's host; it takes that workspace's key.",
+          "models": [],
+          "workspace": true
+        }
+      ],
+      "plan": "payg-intl",
+      "endpoint_env": "QWEN_BASE_URL",
+      "plan_pinned_in_config": false,
+      "warnings": []
+    }
+  ]
+}
