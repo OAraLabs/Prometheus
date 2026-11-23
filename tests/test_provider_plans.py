@@ -151,18 +151,27 @@ def test_plan_for_endpoint():
 def test_get_lists_plans_and_the_one_in_use():
     r = _client().get("/api/providers/keys")
     assert r.status_code == 200
-    assert r.json()["plans_version"] == 1
+    assert r.json()["capabilities"] == {"plans": 1}
     qwen = _svc(r, "qwen")
     assert [p["id"] for p in qwen["plans"]] == ["payg-intl", "payg-us", "token-plan", "coding-plan", "workspace"]
     assert qwen["plan"] == "payg-intl"
-    assert qwen["endpoint_env"] == "QWEN_BASE_URL"
+    assert qwen["endpoint_set"] is False
     assert qwen["plan_pinned_in_config"] is False
-    assert next(p for p in qwen["plans"] if p["id"] == "workspace")["endpoint"] is None
-    coding = next(p for p in qwen["plans"] if p["id"] == "coding-plan")
-    assert coding["terms"] == "interactive" and coding["models"][0] == "qwen3.7-plus"
+    by_id = {p["id"]: p for p in qwen["plans"]}
+    assert [p["default"] for p in qwen["plans"]] == [True, False, False, False, False]
+    assert by_id["workspace"]["custom"] is True and by_id["coding-plan"]["custom"] is False
+    coding = by_id["coding-plan"]
+    assert coding["subscription"] is True and "interactive" in coding["terms"]
+    assert coding["models"][0] == "qwen3.7-plus"
+    assert by_id["payg-intl"]["subscription"] is False and by_id["payg-intl"]["terms"] is None
+    # No host anywhere in the answer: plans are picked by id.
+    for service_plans in plans.PROVIDER_PLANS.values():
+        for plan in service_plans:
+            if plan.endpoint:
+                assert urlsplit(plan.endpoint).hostname not in r.text
     for no_plans in ("deepseek", "gemini", "claude", "wan-image"):
         svc = _svc(r, no_plans)
-        assert svc["plans"] == [] and svc["plan"] is None and svc["endpoint_env"] is None
+        assert svc["plans"] == [] and svc["plan"] is None and svc["endpoint_set"] is False
 
 
 def test_get_never_reveals_a_workspace_or_hand_set_host(monkeypatch):
@@ -255,6 +264,18 @@ def test_refusals_write_nothing(service, body, status):
     assert _written() == {}
     for var in _VARS:
         assert var not in os.environ
+
+
+def test_replacing_a_hand_set_endpoint_needs_replace_custom(monkeypatch):
+    monkeypatch.setenv("QWEN_BASE_URL", "https://my-gateway.example/v1")
+    c = _client()
+    body = {"values": {"QWEN_API_KEY": QWEN_KEY}, "plan": "coding-plan"}
+    r = c.put("/api/providers/keys/qwen", json=body)
+    assert r.status_code == 409 and "my-gateway" not in r.text
+    assert _written() == {} and os.environ["QWEN_BASE_URL"] == "https://my-gateway.example/v1"
+    r = c.put("/api/providers/keys/qwen", json={**body, "replace_custom": True})
+    assert r.status_code == 200 and _svc(r, "qwen")["plan"] == "coding-plan"
+    assert _svc(r, "qwen")["endpoint_set"] is True
 
 
 def test_a_yaml_pin_refuses_a_plan_and_writes_nothing():

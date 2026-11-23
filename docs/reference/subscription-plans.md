@@ -22,33 +22,35 @@ Every other service has `plans: []`: one host, no choice.
 
 ## Capability
 
-The bridge's `subscribed` ack lists `"plans"` in its capabilities, and `GET /api/providers/keys` carries
-`"plans_version": 1`. With an older daemon (neither present), show no plan choice and save keys exactly as before.
+`GET /api/providers/keys` carries `"capabilities": {"plans": 1}`, and the bridge's `subscribed` ack lists `"plans"`.
+With an older daemon (neither present), show no plan choice and save keys exactly as before.
 
 ## `GET /api/providers/keys`
 
-Owner only, as before. New fields, at the top level:
+Owner only, as before. New at the top level:
 
-- `plans_version`: `1`.
+- `capabilities`: `{"plans": 1}`.
 - `workspace_regions`: the regions a workspace host may be in, for the workspace sheet's picker.
 
 And per service:
 
-- `plans`: each `{id, label, endpoint, terms, terms_note, models, workspace}`.
-  - `endpoint`: the documented public host, for display only. `null` for the workspace plan. Never send it back.
-  - `terms`: `"metered"` (ordinary pay as you go) or `"interactive"` (the provider limits it to a person working in a
-    coding tool or agent). Show `terms_note` beside an interactive plan.
+- `plans`: each `{id, label, subscription, terms, default, custom, models}`.
+  - `subscription`: true for a plan its provider limits to a person working in a coding tool or agent.
+  - `terms`: the one-line terms label for such a plan, else `null`. A label: nothing is blocked on it.
+  - `default`: true for the provider's default host (the first plan).
+  - `custom`: true for the one plan that takes input of its own (a workspace id and region).
   - `models`: the models this plan serves, default first; empty means the provider's usual list.
-  - `workspace`: true for the one plan that needs a workspace id and region.
-- `plan`: the plan in use, as an id. `"workspace"` for a workspace host and `"custom"` for an endpoint set by hand that
-  is on no list. **The host itself is never returned.** `null` for a service without plans (or one whose provider the
-  owner swapped in yaml).
-- `endpoint_env`: the name of the variable the plan is stored in (`QWEN_BASE_URL`), or `null`. A name only.
+- `plan`: the plan in use, as an id. When nothing is set, the default plan's id. `"workspace"` for a workspace host,
+  `"custom"` for an endpoint set by hand that is on no list. `null` for a service without plans (or one whose provider
+  the owner swapped in yaml).
+- `endpoint_set`: whether the endpoint variable is set at all (false on the default plan).
 - `plan_pinned_in_config`: true when `prometheus.yaml` pins `slash_commands.<id>.base_url`. That wins over a saved
-  plan, so a `PUT` with a plan is refused (409); say so instead of offering the choice.
+  plan, so a `PUT` with a plan is refused (409). Say so instead of offering the choice.
 - `warnings`: lines naming each route that runs this provider unattended (the primary model, a router fallback, a
-  rule, smart routing, escalation) while it is on an interactive plan. Show them; nothing is blocked.
+  rule, smart routing, escalation) while it is on a subscription plan. Show them. Nothing is blocked.
 - `default_model` now follows the plan: on Kimi Code it reads `kimi-for-coding`.
+
+**No host or base URL appears anywhere in the answer.** A client picks plans by id.
 
 ## `PUT /api/providers/keys/{id}`
 
@@ -60,10 +62,11 @@ Owner only, as before. The body may add a plan:
 ```
 
 - A plan is saved **only together with its key**: `values` must carry the service's key, non-empty. A plan alone is
-  400.
+  400. (A plan's host takes only that plan's key, so moving an old key to a new host is never what was meant.)
 - `plan` must be an id from that service's `plans`. Anything else (a URL, a non-string, a service with no plans) is 400.
 - `workspace` is required for, and only allowed with, the workspace plan. The id is one DNS label (lowercase letters,
-  digits, hyphens, no dot); the region is one of `workspace_regions`. The daemon builds the host itself.
+  digits, hyphens, no dot), and the region is one of `workspace_regions`. The daemon builds the host itself.
+- Replacing an endpoint set by hand (`plan: "custom"`) needs `"replace_custom": true`, else 409.
 - The endpoint variable can never be sent in `values`: it is not the service's, so it is 400 like any other name.
 - Every refusal writes nothing.
 - Choosing the default plan clears the variable, so the provider's default host applies.

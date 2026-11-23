@@ -6447,31 +6447,35 @@ def create_app(
     from prometheus.providers import plans as _plans
 
     def _plan_fields(service_id: str) -> dict:
-        # Subscription plans (providers/plans.py). A service without plans gets an empty list and a null plan. The
-        # plan in use is an id, never a host: a workspace reads as "workspace", a hand-set endpoint as "custom".
+        # Subscription plans (providers/plans.py), in the shape the apps record against
+        # (docs/reference/subscription-plans.md). No host anywhere: a client picks a plan by id, and the plan in use
+        # is an id too ("workspace" for a workspace host, "custom" for a hand-set endpoint on no list).
         plans = _plans.plans_for(service_id)
+        endpoint_env = _plans.endpoint_env_for(service_id)
         return {
             "plans": [
                 {
                     "id": p.id,
                     "label": p.label,
-                    "endpoint": p.endpoint or None,  # public, documented hosts only; null for the workspace pattern
-                    "terms": p.terms,
-                    "terms_note": p.terms_note,
+                    "subscription": p.terms == _plans.TERMS_INTERACTIVE,
+                    # The terms label: the one-line note for a plan its provider limits to interactive use, else null.
+                    "terms": p.terms_note if p.terms == _plans.TERMS_INTERACTIVE else None,
+                    "default": i == 0,
+                    # True for the plan that takes input of its own (a workspace id and region).
+                    "custom": p.id == _plans.WORKSPACE_PLAN,
                     "models": list(p.models),
-                    "workspace": p.id == _plans.WORKSPACE_PLAN,
                 }
-                for p in plans
+                for i, p in enumerate(plans)
             ],
             "plan": _plans.active_plan(service_id, config),
-            "endpoint_env": _plans.endpoint_env_for(service_id) or None,
+            "endpoint_set": bool(endpoint_env and os.environ.get(endpoint_env)),
             "plan_pinned_in_config": bool(plans) and _plans.base_url_pinned_in_config(service_id, config),
         }
 
     def _provider_keys_payload() -> dict:
         warnings = _plans.unattended_warnings(config)
         return {
-            "plans_version": 1,
+            "capabilities": {"plans": 1},
             "workspace_regions": list(_plans.WORKSPACE_REGIONS),
             "services": [
                 {
@@ -6555,6 +6559,12 @@ def create_app(
             if not cleaned.get(key_var):
                 return JSONResponse(status_code=400, content={
                     "error": f"a plan is saved together with its key: send {key_var} in values"})
+            # An endpoint set by hand (on no list) is the owner's own; replacing it is said out loud.
+            if _plans.active_plan(service_id, config) == _plans.CUSTOM_PLAN and body.get("replace_custom") is not True \
+                    and not _plans.base_url_pinned_in_config(service_id, config):
+                return JSONResponse(status_code=409, content={
+                    "error": "this provider uses an endpoint set by hand; send \"replace_custom\": true to "
+                             "replace it with a plan"})
             if _plans.base_url_pinned_in_config(service_id, config):
                 return JSONResponse(status_code=409, content={
                     "error": f"prometheus.yaml sets slash_commands.{service_id}.base_url, which wins over a "
