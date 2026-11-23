@@ -74,6 +74,9 @@ PRICING: dict[str, tuple[float, float]] = {
     # prompt length): these are the standard tier, text input.
     "gemini-2.5-flash": (0.30, 2.50),
     "gemini-2.5-pro": (1.25, 10.00),                # ≤200k prompt
+    # Their replacements — verified 2026-11-23 from aistudio.google.com/docs/pricing, standard tier.
+    "gemini-3.5-flash-lite": (0.30, 2.50),
+    "gemini-3.8-flash": (0.75, 3.75),               # through 2026-12-31; $1.50 / $7.50 from 2027-01-01
     # xAI (not re-verified — docs.x.ai no longer lists grok-3)
     "grok-3": (3.00, 15.00),
     "grok-3-mini": (0.30, 0.50),

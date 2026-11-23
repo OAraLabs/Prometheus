@@ -32,7 +32,7 @@ from tests.test_setup_api_phase2 import config_dir, env_file, make_client, pair 
 
 #: provider → (key variable, default model, the host its requests go to)
 EXPECTED = {
-    "gemini": ("GEMINI_API_KEY", "gemini-2.5-flash", "generativelanguage.googleapis.com"),
+    "gemini": ("GEMINI_API_KEY", "gemini-3.5-flash-lite", "generativelanguage.googleapis.com"),
     "xai": ("XAI_API_KEY", "grok-4.5", "api.x.ai"),
 }
 KEY = "dummy-key-for-the-setup-tests-0123456789"
@@ -111,7 +111,7 @@ class TestDetectListsThem:
         rows = {r["provider"]: r for r in
                 client.get("/api/setup/detect", headers=pair(client)).json()["cloud_providers"]}
         assert rows["gemini"] == {"provider": "gemini", "api_key_env": "GEMINI_API_KEY",
-                                  "default_model": "gemini-2.5-flash", "key_present": False}
+                                  "default_model": "gemini-3.5-flash-lite", "key_present": False}
         assert rows["xai"] == {"provider": "xai", "api_key_env": "XAI_API_KEY", "default_model": "grok-4.5",
                                "key_present": True}
 

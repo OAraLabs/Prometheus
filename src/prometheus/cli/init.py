@@ -345,7 +345,7 @@ _CLOUD_FAST_PROVIDERS: dict[str, tuple[str, str, int]] = {
     # without a prompt could not choose them, because this table did not list them. The key variable and model are
     # CLOUD_DEFAULTS' and OVERRIDE_PRESETS' (tests/test_model_catalog_consistency.py holds the three together); the
     # budget is the wizard's (setup_wizard.PROVIDER_EFFECTIVE_LIMITS).
-    "gemini": ("GEMINI_API_KEY", "gemini-2.5-flash", 64000),
+    "gemini": ("GEMINI_API_KEY", "gemini-3.5-flash-lite", 64000),
     "xai": ("XAI_API_KEY", "grok-4.5", 64000),
 }
 

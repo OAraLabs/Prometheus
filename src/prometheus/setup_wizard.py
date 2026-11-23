@@ -70,8 +70,8 @@ CLOUD_PROVIDER_MODELS: dict[str, list[tuple[str, str, str]]] = {
         ("claude-haiku-4-5-20251001", "Fast + cheap", "$1/$5 per 1M tokens"),
     ],
     "gemini": [
-        ("gemini-2.5-flash", "Fast + cheap", "$0.15/$0.60 per 1M tokens"),
-        ("gemini-2.5-pro", "Best quality", "$1.25/$10 per 1M tokens"),
+        ("gemini-3.5-flash-lite", "Fast + cheap", "$0.30/$2.50 per 1M tokens"),
+        ("gemini-3.8-flash", "Best quality", "$0.75/$3.75 per 1M tokens"),
     ],
     "xai": [
         # Single-entry ON PURPOSE, matching PRESET_MODEL_CHOICES: the alias
