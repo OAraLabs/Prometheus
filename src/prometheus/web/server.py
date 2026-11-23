@@ -6444,8 +6444,42 @@ def create_app(
 
     _KEY_VALUE_MAX_CHARS = 4096  # sanity cap; real provider keys are far shorter
 
-    def _provider_keys_payload() -> dict:
+    from prometheus.providers import plans as _plans
+
+    def _plan_fields(service_id: str) -> dict:
+        # Subscription plans (providers/plans.py), in the shape the apps record against
+        # (docs/reference/subscription-plans.md). No host anywhere: a client picks a plan by id, and the plan in use
+        # is an id too ("workspace" for a workspace host, "custom" for a hand-set endpoint on no list).
+        plans = _plans.plans_for(service_id)
+        endpoint_env = _plans.endpoint_env_for(service_id)
         return {
+            "plans": [
+                {
+                    "id": p.id,
+                    "label": p.label,
+                    "subscription": p.terms == _plans.TERMS_INTERACTIVE,
+                    # The terms label: the one-line note for a plan its provider limits to interactive use, else null.
+                    "terms": p.terms_note if p.terms == _plans.TERMS_INTERACTIVE else None,
+                    "default": i == 0,
+                    # True for the plan that takes input of its own (a workspace id and region).
+                    "custom": p.id == _plans.WORKSPACE_PLAN,
+                    # The region slugs a custom (workspace) plan accepts; empty for every other plan.
+                    "regions": list(_plans.WORKSPACE_REGIONS) if p.id == _plans.WORKSPACE_PLAN else [],
+                    "separate_keys": p.separate_keys,
+                    "models": list(p.models),
+                }
+                for i, p in enumerate(plans)
+            ],
+            "plan": _plans.active_plan(service_id, config),
+            "endpoint_set": bool(endpoint_env and os.environ.get(endpoint_env)),
+            "plan_pinned_in_config": bool(plans) and _plans.base_url_pinned_in_config(service_id, config),
+        }
+
+    def _provider_keys_payload() -> dict:
+        warnings = _plans.unattended_warnings(config)
+        return {
+            "capabilities": {"plans": 1},
+            "workspace_regions": list(_plans.WORKSPACE_REGIONS),
             "services": [
                 {
                     "id": svc.id,
@@ -6457,6 +6491,8 @@ def create_app(
                     ],
                     "docs_url": svc.docs_url,
                     "default_model": svc.default_model,
+                    **_plan_fields(svc.id),
+                    "warnings": warnings.get(svc.id, []),
                 }
                 for svc in provider_key_services(config)
             ]
@@ -6470,7 +6506,7 @@ def create_app(
     async def put_provider_keys(service_id: str, body: dict):
         import logging as _logging
 
-        from prometheus.config.env_file import set_env_value
+        from prometheus.config.env_file import set_env_values
 
         svc = next(
             (s for s in provider_key_services(config) if s.id == service_id),
@@ -6508,17 +6544,81 @@ def create_app(
                     "error": f"value for {name} contains control characters"})
             cleaned[name] = value
 
-        for name, value in cleaned.items():
+        # A plan, when one is sent, is saved TOGETHER with the key: a plan's host takes only that plan's key, so
+        # moving an old key to a new host is never what a person meant. The endpoint is written only from the
+        # fixed list in providers/plans.py (or the one workspace pattern), never from the body.
+        endpoint_write: tuple[str, str] | None = None
+        if "plan" in body or "workspace" in body:
+            plan_id = body.get("plan")
+            plan = _plans.plan_by_id(service_id, plan_id) if isinstance(plan_id, str) else None
+            if not _plans.plans_for(service_id):
+                return JSONResponse(status_code=400, content={
+                    "error": f"service {service_id!r} has no plans"})
+            if plan is None:
+                return JSONResponse(status_code=400, content={
+                    "error": "plan must be one of: "
+                             + ", ".join(p.id for p in _plans.plans_for(service_id))})
+            if _plans.active_plan(service_id, config) is None:
+                # prometheus.yaml points this service at another provider, which never reads the plan's variable.
+                return JSONResponse(status_code=409, content={
+                    "error": f"prometheus.yaml sets slash_commands.{service_id}.provider, so a plan would not "
+                             "apply; remove it to choose a plan here"})
+            key_var = svc.env_vars[0]
+            if not cleaned.get(key_var):
+                return JSONResponse(status_code=400, content={
+                    "error": f"a plan is saved together with its key: send {key_var} in values"})
+            # An endpoint set by hand (on no list) is the owner's own; replacing it is said out loud.
+            if _plans.active_plan(service_id, config) == _plans.CUSTOM_PLAN and body.get("replace_custom") is not True \
+                    and not _plans.base_url_pinned_in_config(service_id, config):
+                return JSONResponse(status_code=409, content={
+                    "error": "this provider uses an endpoint set by hand; send \"replace_custom\": true to "
+                             "replace it with a plan"})
+            if _plans.base_url_pinned_in_config(service_id, config):
+                return JSONResponse(status_code=409, content={
+                    "error": f"prometheus.yaml sets slash_commands.{service_id}.base_url, which wins over a "
+                             "saved plan; remove it to choose a plan here"})
+            if plan.id == _plans.WORKSPACE_PLAN:
+                ws = body.get("workspace")
+                if not isinstance(ws, dict):
+                    return JSONResponse(status_code=400, content={
+                        "error": 'the workspace plan needs "workspace": {"id": ..., "region": ...}'})
+                try:
+                    endpoint = _plans.workspace_endpoint(ws.get("id"), ws.get("region"))
+                except _plans.PlanError as exc:
+                    return JSONResponse(status_code=400, content={"error": str(exc)})
+            elif body.get("workspace") is not None:
+                return JSONResponse(status_code=400, content={
+                    "error": "workspace is only for the workspace plan"})
+            else:
+                # The default plan clears the variable, so the provider's own default applies.
+                endpoint = "" if plan is _plans.plans_for(service_id)[0] else plan.endpoint
+            endpoint_write = (_plans.endpoint_env_for(service_id), endpoint)
+
+        # One rewrite of the env file for the key and its endpoint together, then the live environment: a failed
+        # write changes neither, so a key is never left paired with the wrong host.
+        file_writes = dict(cleaned)
+        if endpoint_write is not None:
+            file_writes[endpoint_write[0]] = endpoint_write[1]
+        set_env_values(file_writes)  # a blank value is a deliberate blank line, api_token-style
+        for name, value in file_writes.items():
             if value:
-                set_env_value(name, value)
                 os.environ[name] = value
             else:
-                set_env_value(name, "")  # deliberate blank line, api_token-style
                 os.environ.pop(name, None)
+        for name, value in cleaned.items():
             _logging.getLogger(__name__).info(
                 "provider key %s: %s %s",
                 service_id, "set" if value else "cleared", name,
             )
+        if endpoint_write is not None:
+            # The plan id, never the endpoint: a workspace host names the account.
+            _logging.getLogger(__name__).info(
+                "provider plan %s: %s (%s)", service_id, body.get("plan"), endpoint_write[0])
+
+        # Sessions already on this provider rebuild against what was just saved on their next turn: no restart.
+        router = getattr(app.state, "model_router", None)
+        if router is not None and svc.kind == "llm":
+            router.refresh_preset(service_id, config)
 
         # Same booleans as GET so the client refreshes its view from us.
         return _provider_keys_payload()
