@@ -301,8 +301,8 @@ Artifacts are **content-addressed**: ids are a sha256 prefix of the file bytes, 
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/providers/keys` | List key-able services. Returns `set: true/false` per env var only — **never key values** |
-| PUT | `/api/providers/keys/{service_id}` | Set a provider API key (persisted to `~/.config/prometheus/env`) |
+| GET | `/api/providers/keys` | List key-able services. Returns `set: true/false` per env var only — **never key values** — and, per chat provider, its subscription plans and the plan in use (an id, never a workspace host) |
+| PUT | `/api/providers/keys/{service_id}` | Set a provider API key (persisted to `~/.config/prometheus/env`), optionally with a plan from the list (`"plan"`), saved together; takes effect without a restart. See [subscription plans](../reference/subscription-plans.md) |
 | GET | `/api/providers/xai/oauth` | xAI SuperGrok OAuth status |
 | POST | `/api/providers/xai/oauth/login` | Start the device-code OAuth flow |
 | DELETE | `/api/providers/xai/oauth` | Remove stored xAI OAuth credentials |

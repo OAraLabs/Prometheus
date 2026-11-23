@@ -217,6 +217,10 @@ def _hermetic_prometheus_env(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("QWEN_API_KEY", raising=False)
     monkeypatch.delenv("QWEN_BASE_URL", raising=False)
+    # The endpoint variables a subscription plan writes (providers/plans.py): a host's own plan would change the
+    # models and plan every catalog test reads.
+    monkeypatch.delenv("ZAI_BASE_URL", raising=False)
+    monkeypatch.delenv("MOONSHOT_BASE_URL", raising=False)
 
 
 # ── the gate manifest (#479) ───────────────────────────────────────────────
