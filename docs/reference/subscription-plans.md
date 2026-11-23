@@ -68,6 +68,7 @@ Owner only, as before. The body may add a plan:
   digits, hyphens, no dot), and the region is one of `workspace_regions`. The daemon builds the host itself.
 - Replacing an endpoint set by hand (`plan: "custom"`) needs `"replace_custom": true`, else 409.
 - The endpoint variable can never be sent in `values`: it is not the service's, so it is 400 like any other name.
+- A service whose provider the owner swapped in yaml (`slash_commands.<id>.provider`) refuses a plan with 409.
 - Every refusal writes nothing.
 - Choosing the default plan clears the variable, so the provider's default host applies.
 - A body with no `plan` behaves exactly as before: the key is saved and the plan in use is unchanged.
@@ -75,10 +76,12 @@ Owner only, as before. The body may add a plan:
 
 ## Takes effect without a restart
 
-The key and endpoint are written to the env file (0600) and the daemon's own environment. The next model choice of
-that provider resolves against them, and conversations already on it rebuild against them on their next turn. A model
-the new plan does not serve falls back to the plan's default. The daemon's own primary model (`/api/model`) still
-applies on restart, as today.
+The key and endpoint are written to the env file (0600) in one rewrite, then to the daemon's own environment. The next
+model choice of that provider resolves against them, and conversations already on it rebuild against them on their
+next turn. So do the router's own routes on that provider (fallback entries, rules, smart routing, escalation). A
+model the new plan does not serve falls back to the plan's default, and the conversation's stored choice says so. A
+model pinned in `slash_commands.<id>.model` still wins over the plan's default. The daemon's own primary model
+(`/api/model`) still applies on restart, as today.
 
 ## Terms
 

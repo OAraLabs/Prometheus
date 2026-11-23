@@ -386,3 +386,64 @@ def test_the_bridge_advertises_plans():
     from prometheus.web.ws_server import WebSocketBridge
 
     assert "plans" in WebSocketBridge(loop_context=object(), config={})._server_capabilities()
+
+
+def test_a_plan_for_a_provider_swapped_in_yaml_is_refused():
+    cfg = {"slash_commands": {"qwen": {"provider": "openai_compatible"}}}
+    r = _client(cfg).put("/api/providers/keys/qwen",
+                         json={"values": {"QWEN_API_KEY": QWEN_KEY}, "plan": "coding-plan"})
+    assert r.status_code == 409
+    assert _written() == {}
+
+
+def test_key_and_endpoint_are_one_write(monkeypatch):
+    import prometheus.config.env_file as env_file
+
+    def boom(values, path=None):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(env_file, "set_env_values", boom)
+    with pytest.raises(OSError):
+        _client().put("/api/providers/keys/qwen",
+                      json={"values": {"QWEN_API_KEY": QWEN_KEY}, "plan": "coding-plan"})
+    assert "QWEN_API_KEY" not in os.environ and "QWEN_BASE_URL" not in os.environ
+
+
+def test_a_fallen_back_choice_says_so():
+    router = _router()
+    stored: list = []
+    router.persist_override = lambda sid, key: stored.append((sid, key))
+    c = _client(router=router)
+    router.set_override("s1", resolve_model_target("qwen:qwen3.8-flash", {}), key="qwen:qwen3.8-flash")
+    c.put("/api/providers/keys/qwen", json={"values": {"QWEN_API_KEY": QWEN_KEY}, "plan": "coding-plan"})
+    assert router._overrides["s1"].key == "qwen"
+    assert stored[-1] == ("s1", "qwen")
+
+
+def test_the_routers_own_built_providers_of_that_provider_are_dropped():
+    cfg = RouterConfig(
+        fallback_chain=[{"provider": "qwen", "model": "qwen3.8-max"}, {"provider": "deepseek"}],
+        simple_provider={"provider": "qwen", "model": "qwen3.8-flash"},
+        escalation_provider={"provider": "deepseek"},
+    )
+    router = ModelRouter(cfg, primary_provider=object(), primary_adapter=object(), primary_model="m")
+    sentinel = object()
+    router._fallback_cache = [(c, sentinel) for c, _ in router._fallback_cache]
+    router._simple_provider = sentinel
+    router._escalation_provider = sentinel
+    router._task_rule_providers = {(("provider", repr("qwen")),): sentinel, (("provider", repr("glm")),): sentinel}
+    router.refresh_preset("qwen", {})
+    assert [cached for _, cached in router._fallback_cache] == [None, sentinel]
+    assert router._simple_provider is None and router._escalation_provider is sentinel
+    assert list(router._task_rule_providers) == [(("provider", repr("glm")),)]
+
+
+def test_every_subscription_plan_is_billed_as_a_subscription():
+    from prometheus.telemetry.cost import SUBSCRIPTION_HOST_MARKERS
+
+    for service_plans in plans.PROVIDER_PLANS.values():
+        for plan in service_plans:
+            if not plan.endpoint:
+                continue
+            is_sub = any(m in plan.endpoint for m in SUBSCRIPTION_HOST_MARKERS)
+            assert is_sub == (plan.terms == plans.TERMS_INTERACTIVE), plan.id

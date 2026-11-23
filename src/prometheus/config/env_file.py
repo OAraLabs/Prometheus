@@ -94,23 +94,34 @@ def set_env_value(key: str, value: str, path: Path | None = None) -> Path:
     comments and ordering survive; otherwise the assignment is appended.
     New files are created ``0600`` — this file holds secrets.
     """
+    return set_env_values({key: value}, path)
+
+
+def set_env_values(values: dict[str, str], path: Path | None = None) -> Path:
+    """Set several ``key=value`` assignments in ONE rewrite of the env file.
+
+    For values that only work as a pair (a key and the endpoint it was issued for): one write, so a failure leaves
+    neither changed rather than one. Same rules per key as :func:`set_env_value`.
+    """
     path = path or get_env_file_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
     lines: list[str] = []
-    replaced = False
+    replaced: set[str] = set()
     if path.is_file():
         for raw in path.read_text(encoding="utf-8").splitlines():
             m = _LINE_RE.match(raw)
-            if m and m.group(1) == key and not raw.lstrip().startswith("#"):
-                if not replaced:
-                    lines.append(f"{key}={value}")
-                    replaced = True
+            if m and m.group(1) in values and not raw.lstrip().startswith("#"):
+                key = m.group(1)
+                if key not in replaced:
+                    lines.append(f"{key}={values[key]}")
+                    replaced.add(key)
                 # Drop duplicate assignments of the same key.
                 continue
             lines.append(raw)
-    if not replaced:
-        lines.append(f"{key}={value}")
+    for key, value in values.items():
+        if key not in replaced:
+            lines.append(f"{key}={value}")
 
     created = not path.exists()
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

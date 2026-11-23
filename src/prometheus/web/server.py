@@ -6503,7 +6503,7 @@ def create_app(
     async def put_provider_keys(service_id: str, body: dict):
         import logging as _logging
 
-        from prometheus.config.env_file import set_env_value
+        from prometheus.config.env_file import set_env_values
 
         svc = next(
             (s for s in provider_key_services(config) if s.id == service_id),
@@ -6555,6 +6555,11 @@ def create_app(
                 return JSONResponse(status_code=400, content={
                     "error": "plan must be one of: "
                              + ", ".join(p.id for p in _plans.plans_for(service_id))})
+            if _plans.active_plan(service_id, config) is None:
+                # prometheus.yaml points this service at another provider, which never reads the plan's variable.
+                return JSONResponse(status_code=409, content={
+                    "error": f"prometheus.yaml sets slash_commands.{service_id}.provider, so a plan would not "
+                             "apply; remove it to choose a plan here"})
             key_var = svc.env_vars[0]
             if not cleaned.get(key_var):
                 return JSONResponse(status_code=400, content={
@@ -6586,28 +6591,26 @@ def create_app(
                 endpoint = "" if plan is _plans.plans_for(service_id)[0] else plan.endpoint
             endpoint_write = (_plans.endpoint_env_for(service_id), endpoint)
 
-        for name, value in cleaned.items():
+        # One rewrite of the env file for the key and its endpoint together, then the live environment: a failed
+        # write changes neither, so a key is never left paired with the wrong host.
+        file_writes = dict(cleaned)
+        if endpoint_write is not None:
+            file_writes[endpoint_write[0]] = endpoint_write[1]
+        set_env_values(file_writes)  # a blank value is a deliberate blank line, api_token-style
+        for name, value in file_writes.items():
             if value:
-                set_env_value(name, value)
                 os.environ[name] = value
             else:
-                set_env_value(name, "")  # deliberate blank line, api_token-style
                 os.environ.pop(name, None)
+        for name, value in cleaned.items():
             _logging.getLogger(__name__).info(
                 "provider key %s: %s %s",
                 service_id, "set" if value else "cleared", name,
             )
         if endpoint_write is not None:
-            env_name, endpoint = endpoint_write
-            if endpoint:
-                set_env_value(env_name, endpoint)
-                os.environ[env_name] = endpoint
-            else:
-                set_env_value(env_name, "")
-                os.environ.pop(env_name, None)
             # The plan id, never the endpoint: a workspace host names the account.
             _logging.getLogger(__name__).info(
-                "provider plan %s: %s (%s)", service_id, body.get("plan"), env_name)
+                "provider plan %s: %s (%s)", service_id, body.get("plan"), endpoint_write[0])
 
         # Sessions already on this provider rebuild against what was just saved on their next turn: no restart.
         router = getattr(app.state, "model_router", None)

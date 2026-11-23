@@ -314,7 +314,11 @@ def unattended_warnings(config: Mapping[str, Any] | None) -> dict[str, list[str]
         service_id = service_for_provider(provider)
         if service_id is None:
             continue
-        plan_id = plan_for_endpoint(service_id, base_url) if base_url else active_plan(service_id, config)
+        if base_url:
+            plan_id = plan_for_endpoint(service_id, base_url)
+        else:
+            # A route of its own reads the endpoint variable directly; slash_commands pins do not apply to it.
+            plan_id = plan_for_endpoint(service_id, os.environ.get(endpoint_env_for(service_id), ""))
         plan = plan_by_id(service_id, plan_id or "")
         if plan is None or plan.terms != TERMS_INTERACTIVE:
             continue

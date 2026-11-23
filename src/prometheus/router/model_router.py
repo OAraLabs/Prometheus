@@ -1043,26 +1043,50 @@ class ModelRouter:
                 )
 
     def refresh_preset(self, preset: str, prometheus_config: dict[str, Any] | None) -> int:
-        """Rebuild every session choice of *preset* on its next turn, against the key and plan saved now.
+        """Rebuild what uses *preset*'s provider on its next turn, against the key and plan saved now.
 
-        A built override provider holds the key and endpoint it was built with. After ``PUT /api/providers/keys``
-        changes either, each entry whose picker key is this preset (bare or ``preset:model``) is resolved again
-        and its provider dropped, so the next turn builds one against what was just saved. A model the new plan
-        does not serve falls back to the plan's default. Returns how many entries were refreshed.
+        A built provider holds the key and endpoint it was built with. After ``PUT /api/providers/keys`` changes
+        either, each session choice whose picker key is this preset (bare or ``preset:model``) is resolved again
+        and its provider dropped; a model the new plan does not serve falls back to the plan's default, and the
+        stored choice says so. The router's own lazily built providers of the same provider (fallback entries,
+        task rules, smart routing, escalation) are dropped too, so they rebuild from their config. The daemon's
+        primary provider is built once at boot and still applies on restart. Returns how many session choices
+        were refreshed.
         """
+        provider_name = str(OVERRIDE_PRESETS.get(preset, {}).get("provider", ""))
         refreshed = 0
-        for entry in self._overrides.values():
+        for session_id, entry in self._overrides.items():
             if not entry.key or split_model_key(entry.key)[0] != preset:
                 continue
-            target = resolve_model_target(entry.key, prometheus_config) or resolve_slash_command_target(
-                preset, prometheus_config
-            )
+            target = resolve_model_target(entry.key, prometheus_config)
             if target is None:
-                continue
+                target = resolve_slash_command_target(preset, prometheus_config)
+                if target is None:
+                    continue
+                # The chosen model is not served on the new plan: the choice is now the preset's default.
+                entry.key = preset
+                if entry.persisted and self.persist_override is not None:
+                    try:
+                        self.persist_override(session_id, preset)
+                    except Exception:  # noqa: BLE001 — the choice is set; the log says it will not survive a restart
+                        log.exception("model choice for %s could not be stored after a plan change", session_id)
             entry.provider_config = dict(target)
             entry.provider = None
             entry.adapter = None
             refreshed += 1
+        if provider_name:
+            self._fallback_cache = [
+                (cfg, None if _entry_provider(cfg) == provider_name else cached)
+                for cfg, cached in self._fallback_cache
+            ]
+            if (self.config.simple_provider or {}).get("provider") == provider_name:
+                self._simple_provider = None
+            if (self.config.escalation_provider or {}).get("provider") == provider_name:
+                self._escalation_provider = None
+            marker = ("provider", repr(provider_name))
+            self._task_rule_providers = {
+                k: v for k, v in self._task_rule_providers.items() if marker not in k
+            }
         return refreshed
 
     def clear_override(self, session_id: str, *, persist: bool = True) -> None:
