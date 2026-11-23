@@ -4,6 +4,8 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## Unreleased
 
+- Models: `qwen4-max`, Alibaba's newest Qwen flagship, can now be chosen from the Qwen list and in setup, priced at $1.50 / $4.50 per million tokens (international pay as you go) with a 131,072-token output cap. Alibaba's Token Plan serves it too. The Qwen default stays `qwen3.8-max`.
+
 ## 0.9.21 (2026-11-17)
 
 ### Security advisories
