@@ -87,7 +87,9 @@ PROVIDER_PLANS: dict[str, tuple[Plan, ...]] = {
         ),
         Plan(
             id="token-plan",
-            label="Token Plan",
+            # Singapore is the only region Alibaba offers the Token Plan in (base-url page, read 2026-11-23); there
+            # is no US Token Plan host.
+            label="Token Plan (Singapore)",
             endpoint="https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
             terms=TERMS_INTERACTIVE,
             terms_note=_INTERACTIVE_NOTE_ALIBABA,

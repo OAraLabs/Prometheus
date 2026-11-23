@@ -112,7 +112,7 @@
         },
         {
           "id": "token-plan",
-          "label": "Token Plan",
+          "label": "Token Plan (Singapore)",
           "subscription": true,
           "terms": "For interactive coding tools and agents only, not automated scripts, backends or scheduled jobs.",
           "default": false,
