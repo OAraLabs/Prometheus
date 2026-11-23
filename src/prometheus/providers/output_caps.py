@@ -112,6 +112,7 @@ MODEL_OUTPUT_LIMITS: dict[str, ModelOutputLimit] = {
     # Google: 65,536 output, thought tokens included.
     "gemini-2.5-flash": ModelOutputLimit(32768, 65536),
     "gemini-2.5-pro": ModelOutputLimit(32768, 65536),
+    "gemini-3.5-flash-lite": ModelOutputLimit(32768, 65536),
 }
 
 

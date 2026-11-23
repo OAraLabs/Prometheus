@@ -203,7 +203,7 @@ none either — the key is documented so its absence is visible.
 | `slash_commands.gemini` | *(section)* |
 | `slash_commands.gemini.provider` | `gemini` |
 | `slash_commands.gemini.api_key_env` | `GEMINI_API_KEY` |
-| `slash_commands.gemini.model` | `gemini-2.5-flash` |
+| `slash_commands.gemini.model` | `gemini-3.5-flash-lite` |
 | `slash_commands.xai` | *(section)* |
 | `slash_commands.xai.provider` | `xai` |
 | `slash_commands.xai.api_key_env` | `XAI_API_KEY` |

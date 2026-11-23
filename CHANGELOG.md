@@ -4,6 +4,8 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## Unreleased
 
+- Models: the Gemini default is now `gemini-3.5-flash-lite`, the model Google names as the replacement for `gemini-2.5-flash`. Google routes `gemini-2.5-flash` there anyway from 2026-12-01 and has removed it from AI Studio. The Gemini choices are now `gemini-3.5-flash-lite` and `gemini-3.8-flash`, Google's replacement for `gemini-2.5-pro`. Both are priced. A config that names `gemini-2.5-flash` or `gemini-2.5-pro` keeps working and is still billed at the rates recorded for those models.
+
 ## 0.9.21 (2026-11-17)
 
 ### Security advisories

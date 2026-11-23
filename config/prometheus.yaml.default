@@ -923,7 +923,7 @@ router:
 # (claude-sonnet-4-5-20250929). Anthropic pre-4.6 aliases resolve
 # server-side; 4.6+ IDs are already dateless pinned snapshots. For
 # OpenAI / Gemini / xAI use the model name the provider exposes
-# (e.g. gpt-5.6-luna, gemini-2.5-pro, grok-4.5).
+# (e.g. gpt-5.6-luna, gemini-3.8-flash, grok-4.5).
 #
 # COST NOTE: a model with no row in src/prometheus/telemetry/cost.py PRICING
 # still runs — it just cannot be priced, and /status will say so rather than
@@ -944,7 +944,7 @@ slash_commands:
   gemini:
     provider: gemini
     api_key_env: GEMINI_API_KEY
-    model: gemini-2.5-flash
+    model: gemini-3.5-flash-lite
   xai:
     provider: xai
     api_key_env: XAI_API_KEY
