@@ -57,6 +57,9 @@ class Plan:
     terms_note: str
     #: The models this plan serves, default first. Empty means the provider's own list (``PRESET_MODEL_CHOICES``).
     models: tuple[str, ...] = ()
+    #: True when this plan's keys are issued separately from the provider's other plans, so a key saved for one
+    #: never works on another. The PUT route requires a newly sent key with EVERY plan change regardless.
+    separate_keys: bool = True
 
 
 _INTERACTIVE_NOTE_ALIBABA = (
@@ -155,9 +158,10 @@ WORKSPACE_REGIONS: tuple[str, ...] = (
 
 #: A workspace id: one DNS label, lowercase letters, digits and hyphens. No dot, so it can never reach outside
 #: ``<id>.<region>.maas.aliyuncs.com``.
-_WORKSPACE_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_WORKSPACE_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,58}[a-z0-9])?")
+_WORKSPACE_DOMAIN = ".maas.aliyuncs.com"
 _WORKSPACE_HOST = re.compile(
-    r"https://(?P<id>[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.(?P<region>[a-z0-9-]+)"
+    r"https://(?P<id>[a-z0-9](?:[a-z0-9-]{0,58}[a-z0-9])?)\.(?P<region>[a-z0-9-]+)"
     r"\.maas\.aliyuncs\.com/compatible-mode/v1"
 )
 #: Hosts under the same domain that are plans of their own, never a workspace.
@@ -195,7 +199,18 @@ def workspace_endpoint(workspace_id: str, region: str) -> str:
         raise PlanError("that id names a plan host, not a workspace; choose the plan instead")
     if region not in WORKSPACE_REGIONS:
         raise PlanError(f"workspace region must be one of: {', '.join(WORKSPACE_REGIONS)}")
-    return f"https://{workspace_id}.{region}.maas.aliyuncs.com/compatible-mode/v1"
+    endpoint = f"https://{workspace_id}.{region}{_WORKSPACE_DOMAIN}/compatible-mode/v1"
+    # Belt and braces over the two checks above: the built URL must parse to a host in the provider's domain.
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(endpoint)
+    host = parts.hostname or ""
+    if (
+        parts.scheme != "https" or parts.port is not None or parts.username or parts.query or parts.fragment
+        or host != f"{workspace_id}.{region}{_WORKSPACE_DOMAIN}" or not host.endswith(_WORKSPACE_DOMAIN)
+    ):
+        raise PlanError("workspace id and region do not make a host in the provider's domain")
+    return endpoint
 
 
 def _is_workspace_host(endpoint: str) -> bool:

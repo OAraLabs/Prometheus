@@ -34,11 +34,14 @@ Owner only, as before. New at the top level:
 
 And per service:
 
-- `plans`: each `{id, label, subscription, terms, default, custom, models}`.
+- `plans`: each `{id, label, subscription, terms, default, custom, regions, separate_keys, models}`.
   - `subscription`: true for a plan its provider limits to a person working in a coding tool or agent.
   - `terms`: the one-line terms label for such a plan, else `null`. A label: nothing is blocked on it.
   - `default`: true for the provider's default host (the first plan).
   - `custom`: true for the one plan that takes input of its own (a workspace id and region).
+  - `regions`: for a custom plan, the region slugs it accepts (the same list as `workspace_regions`); empty otherwise.
+  - `separate_keys`: true when the plan's keys are issued separately. Every plan change needs a key in the same `PUT`
+    regardless, so the daemon enforces this for every plan.
   - `models`: the models this plan serves, default first; empty means the provider's usual list.
 - `plan`: the plan in use, as an id. When nothing is set, the default plan's id. `"workspace"` for a workspace host,
   `"custom"` for an endpoint set by hand that is on no list. `null` for a service without plans (or one whose provider
@@ -64,8 +67,10 @@ Owner only, as before. The body may add a plan:
 - A plan is saved **only together with its key**: `values` must carry the service's key, non-empty. A plan alone is
   400. (A plan's host takes only that plan's key, so moving an old key to a new host is never what was meant.)
 - `plan` must be an id from that service's `plans`. Anything else (a URL, a non-string, a service with no plans) is 400.
-- `workspace` is required for, and only allowed with, the workspace plan. The id is one DNS label (lowercase letters,
-  digits, hyphens, no dot), and the region is one of `workspace_regions`. The daemon builds the host itself.
+- `workspace` is required for, and only allowed with, the workspace plan. The id matches
+  `^[a-z0-9](?:[a-z0-9-]{0,58}[a-z0-9])?$`, and the region is one of `regions`. The daemon builds the host itself, then
+  checks that it parses to a host in the provider's domain.
+- Error bodies never quote a key value or a host, whether built or set by hand.
 - Replacing an endpoint set by hand (`plan: "custom"`) needs `"replace_custom": true`, else 409.
 - The endpoint variable can never be sent in `values`: it is not the service's, so it is 400 like any other name.
 - A service whose provider the owner swapped in yaml (`slash_commands.<id>.provider`) refuses a plan with 409.

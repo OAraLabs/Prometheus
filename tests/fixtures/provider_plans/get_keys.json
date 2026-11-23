@@ -49,6 +49,8 @@
           "terms": null,
           "default": true,
           "custom": false,
+          "regions": [],
+          "separate_keys": true,
           "models": []
         },
         {
@@ -58,6 +60,8 @@
           "terms": "A membership for programming tools; for your own product or unattended work, use pay as you go.",
           "default": false,
           "custom": false,
+          "regions": [],
+          "separate_keys": true,
           "models": [
             "kimi-for-coding",
             "kimi-for-coding-highspeed",
@@ -91,6 +95,8 @@
           "terms": null,
           "default": true,
           "custom": false,
+          "regions": [],
+          "separate_keys": true,
           "models": []
         },
         {
@@ -100,6 +106,8 @@
           "terms": null,
           "default": false,
           "custom": false,
+          "regions": [],
+          "separate_keys": true,
           "models": []
         },
         {
@@ -109,6 +117,8 @@
           "terms": "For interactive coding tools and agents only, not automated scripts, backends or scheduled jobs.",
           "default": false,
           "custom": false,
+          "regions": [],
+          "separate_keys": true,
           "models": []
         },
         {
@@ -118,6 +128,8 @@
           "terms": "For interactive coding tools and agents only, not automated scripts, backends or scheduled jobs.",
           "default": false,
           "custom": false,
+          "regions": [],
+          "separate_keys": true,
           "models": [
             "qwen3.7-plus",
             "qwen3.6-plus",
@@ -131,6 +143,15 @@
           "terms": null,
           "default": false,
           "custom": true,
+          "regions": [
+            "ap-southeast-1",
+            "us-east-1",
+            "eu-central-1",
+            "ap-northeast-1",
+            "cn-hongkong",
+            "cn-beijing"
+          ],
+          "separate_keys": true,
           "models": []
         }
       ],

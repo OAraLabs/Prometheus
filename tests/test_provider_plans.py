@@ -118,6 +118,7 @@ def test_documented_plan_hosts():
     ("WS-UPPER", "ap-southeast-1"),
     ("", "ap-southeast-1"),
     ("-lead", "ap-southeast-1"),
+    ("a" * 61, "ap-southeast-1"),
     ("ws-1@x", "ap-southeast-1"),
     ("token-plan", "ap-southeast-1"),
     ("trial", "cn-beijing"),
@@ -447,3 +448,33 @@ def test_every_subscription_plan_is_billed_as_a_subscription():
                 continue
             is_sub = any(m in plan.endpoint for m in SUBSCRIPTION_HOST_MARKERS)
             assert is_sub == (plan.terms == plans.TERMS_INTERACTIVE), plan.id
+
+
+def test_workspace_plan_carries_its_regions_and_every_plan_says_separate_keys():
+    qwen = _svc(_client().get("/api/providers/keys"), "qwen")
+    by_id = {p["id"]: p for p in qwen["plans"]}
+    assert by_id["workspace"]["regions"] == list(plans.WORKSPACE_REGIONS)
+    assert all(p["regions"] == [] for p in qwen["plans"] if p["id"] != "workspace")
+    assert all(p["separate_keys"] is True for p in qwen["plans"])
+
+
+def test_the_longest_workspace_id_still_builds():
+    assert plans.workspace_endpoint("a" * 60, "us-east-1").startswith("https://" + "a" * 60 + ".us-east-1.")
+
+
+def test_error_bodies_never_quote_a_key_or_a_built_host(monkeypatch):
+    c = _client()
+    bodies = [
+        {"values": {"QWEN_API_KEY": QWEN_KEY}, "plan": "workspace", "workspace": {"id": WS_ID, "region": "moon-1"}},
+        {"values": {"QWEN_API_KEY": QWEN_KEY}, "plan": "nope"},
+        {"values": {"QWEN_API_KEY": QWEN_KEY + "\nX=1"}, "plan": "coding-plan"},
+        {"values": {"QWEN_API_KEY": QWEN_KEY, "OPENAI_API_KEY": QWEN_KEY}},
+    ]
+    for body in bodies:
+        r = c.put("/api/providers/keys/qwen", json=body)
+        assert r.status_code >= 400
+        assert QWEN_KEY not in r.text and WS_ID not in r.text and "maas.aliyuncs" not in r.text
+    monkeypatch.setenv("QWEN_BASE_URL", plans.workspace_endpoint(WS_ID, "us-east-1"))
+    r = _client({"slash_commands": {"qwen": {"base_url": "https://pinned.example/v1"}}}).put(
+        "/api/providers/keys/qwen", json={"values": {"QWEN_API_KEY": QWEN_KEY}, "plan": "payg-us"})
+    assert r.status_code == 409 and "pinned.example" not in r.text and WS_ID not in r.text

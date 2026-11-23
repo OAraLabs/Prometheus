@@ -6463,6 +6463,9 @@ def create_app(
                     "default": i == 0,
                     # True for the plan that takes input of its own (a workspace id and region).
                     "custom": p.id == _plans.WORKSPACE_PLAN,
+                    # The region slugs a custom (workspace) plan accepts; empty for every other plan.
+                    "regions": list(_plans.WORKSPACE_REGIONS) if p.id == _plans.WORKSPACE_PLAN else [],
+                    "separate_keys": p.separate_keys,
                     "models": list(p.models),
                 }
                 for i, p in enumerate(plans)
