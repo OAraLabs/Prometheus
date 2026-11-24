@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **464** of
+Every key in `config/prometheus.yaml.default` — **467** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -369,6 +369,9 @@ none either — the key is documented so its absence is visible.
 | `push.apns.key_id` | *(empty — no code default)* |
 | `push.apns.team_id` | *(empty — no code default)* |
 | `push.apns.topic` | *(empty — no code default)* |
+| `push.critical_tools` | *(empty — no code default)* |
+| `push.critical_commands` | *(empty — no code default)* |
+| `push.critical_paths` | *(empty — no code default)* |
 | `image_generation` | *(section)* |
 | `image_generation.default_backend` | `auto` |
 | `image_generation.comfyui` | *(section)* |
