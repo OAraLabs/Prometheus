@@ -429,7 +429,10 @@ _MODEL_MAX_CHARS = 200
 
 
 def _has_control_characters(value: str) -> bool:
-    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+    # Every control and line-breaking character, not only ASCII ones: the env file's check is the one rule.
+    from prometheus.config.env_file import env_value_problem
+
+    return env_value_problem(value) is not None
 
 
 def _unsafe_secret(value: str) -> str | None:
@@ -437,8 +440,10 @@ def _unsafe_secret(value: str) -> str | None:
     value starts a second assignment."""
     if len(value) > _SECRET_MAX_CHARS:
         return "that is too long to be a key or token"
-    if _has_control_characters(value):
-        return "a key or token has no control characters or line breaks"
+    from prometheus.config.env_file import env_value_problem
+
+    if problem := env_value_problem(value):
+        return f"that key or token {problem}"
     return None
 
 

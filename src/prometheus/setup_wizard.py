@@ -483,14 +483,20 @@ class SetupWizard:
         elif len(key_input) > 20:
             # They pasted a raw key — persist it to the env file (the one
             # `oara daemon` and the systemd unit load), never the yaml.
-            from prometheus.config.env_file import get_env_file_path, set_env_value
+            from prometheus.config.env_file import EnvValueError, get_env_file_path, set_env_value
 
             self._api_key_env = default_env
             api_key = key_input
-            env_path = set_env_value(default_env, key_input, get_env_file_path())
-            print(f"\n  + Key saved to {env_path} (as {default_env}).")
-            print(f"  Config will reference ${default_env}, not store the key.\n")
-            os.environ[default_env] = key_input  # set for the smoke test
+            try:
+                env_path = set_env_value(default_env, key_input, get_env_file_path())
+            except EnvValueError as exc:
+                # Not saved: the config still references the variable, as when Enter is pressed.
+                print(f"\n  ! Not saved: {exc}. Paste the key alone, on one line, or set ${default_env}.\n")
+                api_key = os.environ.get(default_env, "")
+            else:
+                print(f"\n  + Key saved to {env_path} (as {default_env}).")
+                print(f"  Config will reference ${default_env}, not store the key.\n")
+                os.environ[default_env] = key_input  # set for the smoke test
         else:
             # Custom env var name
             self._api_key_env = key_input
