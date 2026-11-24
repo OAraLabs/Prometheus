@@ -131,8 +131,9 @@ def test_the_floor_is_narrower_than_the_shipped_list_and_is_credentials_only():
     # for a shell write — a planted job runs as the owner on the next tick, with no restart.
     # `/node`, `/mcp_servers`, `/xai_oauth`: the machine's private keys, the MCP store with its servers'
     # credentials, and the xAI OAuth tokens.
-    assert all(any(m in p for m in (".ssh", ".gnupg", "env", "/pairing", "/devices.db", "/cron_", "/node",
-                                    "/mcp_servers", "/xai_oauth"))
+    # `.config/prometheus`: the credentials folder, whole (the env file's backups, the APNs signing key, tokens).
+    assert all(any(m in p for m in (".ssh", ".gnupg", "env", "/.config/prometheus", "/pairing", "/devices.db",
+                                    "/cron_", "/node", "/mcp_servers", "/xai_oauth"))
                for p in _ALWAYS_DENIED_PATHS), (
         f"{_ALWAYS_DENIED_PATHS} contains something that is POLICY, not "
         f"credential material. The line is not 'how small can the floor be' "

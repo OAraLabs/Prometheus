@@ -70,7 +70,9 @@ GRANT_SETS: dict[str, list[dict[str, str]]] = {
                              "tool_name": "computer_click"}],
     "path-outside": [{"kind": "path_prefix", "value": OUTSIDE,
                       "tool_name": "write_file"}],
-    "command-git-push": [{"kind": "command_prefix", "value": "git push",
+    # A remembered command grant covers exactly the command approved (0.9.21), so the value is the command the
+    # matrix calls. Every decision is what origin/main gave for it, so the golden table is untouched.
+    "command-git-push": [{"kind": "command_prefix", "value": "git push origin main",
                           "tool_name": "bash"}],
     "computer-action": [{"kind": COMPUTER_ACTION_KIND,
                          "value": "box:scratchapp:click:background",

@@ -212,8 +212,10 @@ def clean_key(value: Any) -> str:
         raise ModelRefusal(400, INVALID_KEY, "api_key is empty; leave it out to keep the key already saved")
     if len(key) > KEY_MAX_CHARS:
         raise ModelRefusal(400, INVALID_KEY, "that is too long to be an API key")
-    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in key):
-        raise ModelRefusal(400, INVALID_KEY, "an API key has no control characters or line breaks")
+    from prometheus.config.env_file import env_value_problem
+
+    if problem := env_value_problem(key):
+        raise ModelRefusal(400, INVALID_KEY, f"that API key {problem}")
     return key
 
 

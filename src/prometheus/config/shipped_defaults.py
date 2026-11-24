@@ -290,6 +290,21 @@ DENIED_PATHS_DEFAULTS_SHIPPED: tuple[tuple[str, ...], ...] = (
      "/*/.prometheus/data/mcp_servers.json*",
      "/*/.prometheus/xai_oauth.json*",
      "/*/.prometheus/data/pause.json*"),
+    # + the credentials folder, whole (~/.config/prometheus: the env file, its backups, the APNs signing key and any
+    # token beside them); it sits in the floor too.
+    ("/etc", "/sys", "/boot", "/*/.ssh", "/*/.gnupg", "/*/.config/*/*env",
+     "/*/Library/Application Support/Prometheus/pairing",
+     "/*/.local/share/prometheus/pairing",
+     "/*/.prometheus/data/devices.db*",
+     "/*/.prometheus/data/cron_jobs.json*",
+     "/*/.prometheus/data/cron_history.jsonl*",
+     "/*/.prometheus/data/cron_undelivered.jsonl*",
+     "/*/.prometheus/data/cron_scheduler.pid*",
+     "/*/.prometheus/node",
+     "/*/.prometheus/data/mcp_servers.json*",
+     "/*/.prometheus/xai_oauth.json*",
+     "/*/.prometheus/data/pause.json*",
+     "/*/.config/prometheus"),
 )
 
 SHIPPED_DENIED_PATHS: tuple[str, ...] = DENIED_PATHS_DEFAULTS_SHIPPED[-1]

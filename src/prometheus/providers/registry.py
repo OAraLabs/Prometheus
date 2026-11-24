@@ -27,7 +27,9 @@ CLOUD_DEFAULTS: dict[str, dict[str, Any]] = {
     },
     "gemini": {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-        "model": "gemini-2.5-flash",
+        # gemini-3.5-flash-lite is the replacement Google names for gemini-2.5-flash, which it routes there from
+        # 2026-12-01 (aistudio.google.com/docs/deprecations, read 2026-11-23). Stable; tools and images supported.
+        "model": "gemini-3.5-flash-lite",
         "default_env": "GEMINI_API_KEY",
         "default_base_url_env": "GEMINI_BASE_URL",
     },

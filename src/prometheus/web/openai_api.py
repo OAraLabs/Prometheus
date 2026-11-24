@@ -54,7 +54,7 @@ SESSION_PREFIX = "openai"
 LOCAL_MODEL_KEY = "local"
 _ROLES = ("system", "user", "assistant")
 _CLIENT_TOOL_KEYS = ("tools", "functions", "tool_choice", "function_call")
-_CLIENT_SYSTEM_HEADER = "# Instructions from the connecting client"
+from prometheus.context.system_prompt import CLIENT_SYSTEM_HEADER as _CLIENT_SYSTEM_HEADER  # noqa: E402
 
 
 def _error(status: int, message: str, code: str, etype: str = "invalid_request_error") -> JSONResponse:
@@ -213,6 +213,7 @@ def register_openai_routes(
                 loop_context,
                 system_prompt=f"{loop_context.system_prompt}\n\n{_CLIENT_SYSTEM_HEADER}\n"
                               + "\n\n".join(client_system),
+                client_instructions="\n\n".join(client_system),
             )
         if key != LOCAL_MODEL_KEY:
             preset = resolve_model_target(key)

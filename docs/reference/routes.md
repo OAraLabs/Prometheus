@@ -9,7 +9,7 @@ app. For what each one is *for*, see the curated
 [API guide](../guide/api.md) — this file is the complete list, that
 one is the explanation.
 
-## Daemon app — 134 paths
+## Daemon app — 146 paths
 
 | Path | Methods |
 |---|---|
@@ -26,6 +26,12 @@ one is the explanation.
 | `/api/backends/{name}/probe` | POST |
 | `/api/benchmarks/run` | POST |
 | `/api/chat` | POST |
+| `/api/chat-project-suggestions` | GET |
+| `/api/chat-projects` | GET, POST |
+| `/api/chat-projects/{project_id}` | DELETE, GET, PUT |
+| `/api/chat-projects/{project_id}/files` | GET |
+| `/api/chat-projects/{project_id}/files/{name}` | DELETE, GET, PUT |
+| `/api/chat-projects/{project_id}/instructions` | GET, PUT |
 | `/api/chat/interrupt` | POST |
 | `/api/chat/send` | POST |
 | `/api/code` | POST |
@@ -112,12 +118,15 @@ one is the explanation.
 | `/api/sessions/{session_id}/checkpoints/{checkpoint_id}/restore` | POST |
 | `/api/sessions/{session_id}/computer` | DELETE, GET, PUT |
 | `/api/sessions/{session_id}/fork` | GET, POST |
+| `/api/sessions/{session_id}/git` | GET |
 | `/api/sessions/{session_id}/messages` | GET |
 | `/api/sessions/{session_id}/model` | DELETE, GET, POST |
 | `/api/sessions/{session_id}/pin` | PUT |
 | `/api/sessions/{session_id}/profile` | GET, PUT |
+| `/api/sessions/{session_id}/project` | PUT |
 | `/api/sessions/{session_id}/purge` | POST |
 | `/api/sessions/{session_id}/purge-preview` | GET |
+| `/api/sessions/{session_id}/speech` | GET |
 | `/api/sessions/{session_id}/title` | PUT |
 | `/api/sessions/{session_id}/workspace` | DELETE, GET, PUT |
 | `/api/skills` | GET |
@@ -125,6 +134,9 @@ one is the explanation.
 | `/api/skills/{name}` | GET |
 | `/api/skills/{name}/pin` | DELETE, POST |
 | `/api/soul` | GET |
+| `/api/speech` | GET |
+| `/api/speech/speak` | POST |
+| `/api/speech/transcribe` | POST |
 | `/api/status` | GET |
 | `/api/stories` | GET, POST |
 | `/api/stories/reorder` | POST |

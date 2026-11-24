@@ -46,6 +46,23 @@ from prometheus.engine.messages import TextBlock
 
 log = logging.getLogger(__name__)
 
+
+_REFERENCE_PREFIX = "\n\n<reference "
+
+
+def reference_block(attrs: str, text: str) -> TextBlock:
+    """The text block a composer reference rides in, after the owner's own text block.
+
+    A block of its own, so what it carries (a file, a diff, a fetched page) is told apart from what the owner typed
+    by the block it is in, not by markers inside it that the page itself could contain (memory/extractor.py).
+    """
+    return TextBlock(text=f"{_REFERENCE_PREFIX}{attrs}>\n{text}\n</reference>")
+
+
+def is_reference_block(text: str) -> bool:
+    """Is *text* a block :func:`reference_block` built?"""
+    return text.startswith(_REFERENCE_PREFIX)
+
 REFERENCE_TYPES: tuple[str, ...] = ("file", "diff", "url")
 MAX_REFERENCES = 16
 FILE_CAP_BYTES = 256 * 1024   # matches /api/files/read's text-preview cap
@@ -257,7 +274,7 @@ class ReferenceResolver:
         if truncated:
             attrs += ' truncated="true"'
             text = text.rstrip() + f"\n...[truncated at {FILE_CAP_BYTES} bytes]"
-        return TextBlock(text=f"\n\n<reference {attrs}>\n{text}\n</reference>")
+        return reference_block(attrs, text)
 
     # ------------------------------------------------------------------- diff
     async def resolve_diff(self, cwd: Path, target: str) -> TextBlock:
@@ -283,7 +300,7 @@ class ReferenceResolver:
         attrs = f'type="diff" ref="{_attr(target or "worktree")}" cwd="{_attr(cwd)}"'
         if truncated:
             attrs += ' truncated="true"'
-        return TextBlock(text=f"\n\n<reference {attrs}>\n{text}\n</reference>")
+        return reference_block(attrs, text)
 
     @staticmethod
     async def _git(cwd: Path, argv: list[str]) -> subprocess.CompletedProcess:
@@ -340,4 +357,4 @@ class ReferenceResolver:
         )
         if page.truncated:
             attrs += ' truncated="true"'
-        return TextBlock(text=f"\n\n<reference {attrs}>\n{page.body}\n</reference>")
+        return reference_block(attrs, page.body)

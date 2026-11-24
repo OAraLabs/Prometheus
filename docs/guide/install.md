@@ -319,6 +319,15 @@ Nothing but the daemon's address and the token leave your machine, and the token
 
 A new install listens on **this machine only** (`web.bind: 127.0.0.1`), so for remote access you set the bind on purpose: `web.bind: 0.0.0.0` (every interface) or a tailnet address, in `prometheus.yaml`, or `oara daemon --bind …`, or `PROMETHEUS_WEB_BIND` in the environment (highest first). An install that predates that default, with no `web.bind` at all, still listens on **every interface** and keeps working. Either way it is plain HTTP with no TLS, so the bearer token is the only access control between the API and whoever can route to the machine, unless home-network mode is on: `network.home_network: true` serves the LAN over TLS on 8006 and 8011 and keeps plain HTTP on 127.0.0.1 (see [the API guide](api.md#ports--remote-access)). `oara doctor` warns while `web.bind` is unset and the daemon would listen on every interface. A headless box you set up from another machine (Beacon driving setup mode) ends up loopback-only afterwards unless you started it with `--bind`: set `web.bind` on the box to reach it again. The flag also covers setup mode, whose pairing endpoint is reachable for up to 15 minutes. The full rules are in [the API guide](api.md#listening-on-this-machine-only).
 
+**Pairing a phone over Tailscale by its full name.** A phone that has no pin yet can ask the daemon to sign the host it dialled (the v2 identity challenge, `docs/guide/api.md`). The daemon signs only for its own names: loopback, the address the phone connected to, this machine's host name and `<name>.local`. A Tailscale name such as `my-server.tail1234.ts.net` is none of those, so list it:
+
+```yaml
+web:
+  identity_hosts: ["my-server.tail1234.ts.net"]
+```
+
+Without it the phone is told `421 host_not_mine` and says so. List the exact name: the daemon does not accept `*.ts.net` as a whole, because every machine on every tailnet has a name under it, and it never decides by suffix on its own. Names are never looked up in DNS. A reverse proxy in front of the daemon must pass the `Host` header on, and its public name goes in the same list.
+
 ## Troubleshooting
 
 - **Something's broken and you don't know what** — `oara doctor`. It checks every subsystem and prints a fix hint per failure; nonzero exit when anything fails.

@@ -3,7 +3,8 @@
 A release gate of the app (docs/design/macos-app-installer.md): on macOS the daemon has neither shell floor (no
 bwrap, no AppArmor), so a shell command the model runs can read whatever this user can, and the app is for people
 who never chose a terminal. A new app install therefore asks before EVERY shell command the model runs and before
-every file write. Reads are not asked about, and what the person types themselves (user origin) is theirs.
+every file write, in every turn: in a turn the owner started, the owner asked for the turn, but the model wrote
+the command. Reads are not asked about.
 
 What changes, and what does not:
 
@@ -58,10 +59,11 @@ def test_cautious_asks_before_every_file_write_even_inside_the_workspace(ws, too
     assert d.requires_confirmation and not d.allowed, d
 
 
-def test_cautious_does_not_ask_for_reads_or_for_what_the_person_types(ws):
+def test_cautious_does_not_ask_for_reads(ws):
     gate = _gate("cautious", ws)
     assert gate.evaluate("read_file", file_path=str(ws / "a.txt"), is_read_only=True, origin="system").allowed
-    assert gate.evaluate("bash", command="ls", origin="user").allowed
+    # A user-origin turn's shell command asks too now (tests/test_cautious_asks_in_every_turn.py).
+    assert not gate.evaluate("bash", command="ls", origin="user").allowed
 
 
 @pytest.mark.parametrize("mode", ["default", "strict"])

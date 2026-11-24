@@ -184,6 +184,9 @@ _ALWAYS_DENIED_PATHS: tuple[str, ...] = (
     "/*/.ssh",
     "/*/.gnupg",
     "/*/.config/*/*env",
+    # The credentials folder, whole: `*env` named one file, and `env.bak-<date>`, the APNs signing key
+    # (`AuthKey_<id>.p8`) and any token file beside it were readable. The configuration lives in ~/.prometheus.
+    "/*/.config/prometheus",
     "/*/Library/Application Support/Prometheus/pairing",
     "/*/.local/share/prometheus/pairing",
     "/*/.prometheus/data/devices.db*",
@@ -333,6 +336,13 @@ _TRUSTED_COMMAND_PATTERNS: list[str] = []
 _TRUSTED_CMD_FORBIDDEN = re.compile(r"[;&|`\n]|\$\(")
 
 
+def is_single_invocation(command: str) -> bool:
+    """False for a command a remembered grant could never match: one that chains (; & |), substitutes ($( or a
+    backtick) or spans lines. ``Grant.matches`` refuses these, so ``derive_grant`` must not offer to remember one."""
+    return not _TRUSTED_CMD_FORBIDDEN.search(command)
+
+
+
 # ---------------------------------------------------------------------------
 # Origin classification
 # ---------------------------------------------------------------------------
@@ -436,10 +446,12 @@ class Grant:
 
     kind:
       "path_prefix"    — file_path resolves under ``value`` (file tools only).
-      "command_prefix" — bash command starts with ``value`` AND is a single
-                         simple invocation (no ; | & ` $() — same guard as the
-                         trusted allowlist, so a prefix grant can't smuggle a
-                         chained command through).
+      "command_prefix" — the bash command IS ``value`` (surrounding whitespace
+                         aside) AND is a single simple invocation (no ; | & `
+                         $() — same guard as the trusted allowlist). The name
+                         is historical: it matched by prefix until 0.9.21, and
+                         stored rows carry it, so it stays. Exact, because
+                         ``value`` is the whole command the owner approved.
       "tool"           — the tool itself, any target (produced by strict-mode
                          approvals whose reason carries no target).
       "computer_action"— a desktop action matching ``app:verb:delivery``
@@ -558,9 +570,20 @@ class Grant:
         if self.kind == "command_prefix":
             if tool_name != "bash" or not command:
                 return False
-            if _TRUSTED_CMD_FORBIDDEN.search(command):
+            if not is_single_invocation(command):
                 return False  # single-invocation guard, same as trusted list
-            return command.startswith(self.value)
+            # EXACT, not a prefix. `value` is the whole command the owner was shown and approved
+            # (derive_grant: "grant that exact command"), and `startswith` let anything longer ride on that
+            # approval: `echo hi` also allowed `echo hi > ~/.zshrc` and `echo history`, and an empty value
+            # allowed every command, because the guard above does not reject redirections, extra arguments or
+            # a longer word. The kind's name stays `command_prefix` because stored rows say so; an operator who
+            # wants a pattern writes an anchored regex in `security.allowed_commands`.
+            #
+            # BYTE FOR BYTE, with no trimming. `str.strip()` also removes \r, \x0b, \x0c, \x1c-\x1f, \x85,
+            # \xa0 and the Unicode spaces, none of which the shell treats as a blank: `bash deploy.sh\x0c`
+            # ran a different file than the one approved. A trailing space or tab costs one prompt, which is
+            # the safe side of the same rule.
+            return bool(self.value.strip()) and command == self.value
         return False
 
     def to_config_dict(self) -> dict:
@@ -685,7 +708,7 @@ class Grant:
                     f"{self.tool_name} on {self.value} and anything under it"
                 )
         elif self.kind == "command_prefix":
-            what = f"any bash command starting with {self.value!r}"
+            what = f"the bash command {self.value!r}, exactly"
         elif self.kind == COMPUTER_ACTION_KIND:
             # Rendered from the STORED value, not from a live ComputerExtent:
             # a grant read back from config has only its five terms, and the
@@ -1486,11 +1509,12 @@ class SecurityGate:
             )
             return PermissionDecision.allow(level=TrustLevel.AUTO)
 
-        # --- LEVEL 1: cautious — EVERY shell command the model runs → APPROVE
-        # (system origin only, like the network rule below: what the person types is theirs). New app installs
-        # start here: on macOS the daemon has no shell floor, so the prompt is the protection. A remembered
-        # grant (checked earlier) and the operator's trusted-command allowlist (just above) still apply.
-        if tool_name == "bash" and not is_user and self._mode == PermissionMode.CAUTIOUS:
+        # --- LEVEL 1: cautious — EVERY shell command the model runs → APPROVE, in BOTH origins. In a turn the
+        # owner started, the owner asked for the turn; the model wrote the command. This used to skip user origin,
+        # so a write the gate held for approval could go through the shell unasked instead. New app installs start
+        # here: on macOS the daemon has no shell floor, so the prompt is the protection. A remembered grant (checked
+        # earlier) and the operator's trusted-command allowlist (just above) still apply.
+        if tool_name == "bash" and self._mode == PermissionMode.CAUTIOUS:
             reason = f"Shell commands require confirmation in cautious mode: {command!r}"
             self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, reason, command)
             self._remember_approve_target(reason, file_path=None, command=command)

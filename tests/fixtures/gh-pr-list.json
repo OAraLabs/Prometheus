@@ -1,0 +1,89 @@
+{
+ "merged": [
+  {
+   "headRefName": "fix/parity-goldens-memory-approval",
+   "isCrossRepository": false,
+   "isDraft": false,
+   "mergeable": "UNKNOWN",
+   "number": 941,
+   "state": "MERGED",
+   "statusCheckRollup": [
+    {
+     "__typename": "CheckRun",
+     "completedAt": "2026-11-23T21:20:27Z",
+     "conclusion": "SUCCESS",
+     "detailsUrl": "https://github.com/OAraLabs/Prometheus/actions/runs/45263511552/job/138004390116",
+     "name": "test (3.11)",
+     "startedAt": "2026-11-23T20:50:51Z",
+     "status": "COMPLETED",
+     "workflowName": "CI"
+    },
+    {
+     "__typename": "CheckRun",
+     "completedAt": "2026-11-23T20:51:39Z",
+     "conclusion": "SUCCESS",
+     "detailsUrl": "https://github.com/OAraLabs/Prometheus/actions/runs/45263511443/job/138004224363",
+     "name": "replay",
+     "startedAt": "2026-11-23T20:50:34Z",
+     "status": "COMPLETED",
+     "workflowName": "Parity"
+    },
+    {
+     "__typename": "CheckRun",
+     "completedAt": "2026-11-23T21:17:54Z",
+     "conclusion": "SUCCESS",
+     "detailsUrl": "https://github.com/OAraLabs/Prometheus/actions/runs/45263511552/job/138004390304",
+     "name": "test (3.12)",
+     "startedAt": "2026-11-23T20:50:51Z",
+     "status": "COMPLETED",
+     "workflowName": "CI"
+    }
+   ],
+   "url": "https://github.com/OAraLabs/Prometheus/pull/941"
+  }
+ ],
+ "draft": [
+  {
+   "headRefName": "docs/https-over-tailscale",
+   "isCrossRepository": false,
+   "isDraft": true,
+   "mergeable": "MERGEABLE",
+   "number": 929,
+   "state": "OPEN",
+   "statusCheckRollup": [
+    {
+     "__typename": "CheckRun",
+     "completedAt": "2026-11-14T02:01:33Z",
+     "conclusion": "SUCCESS",
+     "detailsUrl": "https://github.com/OAraLabs/Prometheus/actions/runs/43541684123/job/132283526606",
+     "name": "test (3.11)",
+     "startedAt": "2026-11-14T01:37:42Z",
+     "status": "COMPLETED",
+     "workflowName": "CI"
+    },
+    {
+     "__typename": "CheckRun",
+     "completedAt": "2026-11-14T02:06:45Z",
+     "conclusion": "SUCCESS",
+     "detailsUrl": "https://github.com/OAraLabs/Prometheus/actions/runs/43541684123/job/132283526523",
+     "name": "test (3.12)",
+     "startedAt": "2026-11-14T01:37:42Z",
+     "status": "COMPLETED",
+     "workflowName": "CI"
+    },
+    {
+     "__typename": "CheckRun",
+     "completedAt": "2026-11-14T01:55:43Z",
+     "conclusion": "SUCCESS",
+     "detailsUrl": "https://github.com/OAraLabs/Prometheus/actions/runs/43541684123/job/132283526511",
+     "name": "test (3.13)",
+     "startedAt": "2026-11-14T01:37:42Z",
+     "status": "COMPLETED",
+     "workflowName": "CI"
+    }
+   ],
+   "url": "https://github.com/OAraLabs/Prometheus/pull/929"
+  }
+ ],
+ "none": []
+}
