@@ -64,6 +64,11 @@ profile prometheus-bash flags=(attach_disconnected) {
   deny @{HOME}/.ssh/{,**}         rwlkmx,
   deny @{HOME}/.gnupg/{,**}       rwlkmx,
   deny @{HOME}/.config/*/*env     rwlkmx,
+  # The credentials folder, whole. `*env` named one file, and a shell read its siblings: `env.bak-<date>` (a copy
+  # of the env file), the APNs signing key `AuthKey_<id>.p8` (push.apns.key_path) and any token file beside them.
+  # Nothing a shell needs lives here (the configuration is in ~/.prometheus), so the rule is the folder, as for
+  # ~/.ssh: `{,**}` takes the folder itself, so it cannot be renamed out from under the rule either.
+  deny @{HOME}/.config/prometheus/{,**} rwlkmx,
 
   # No renaming or replacing ~/.config ITSELF (#766). The env rule names the
   # files, so `mv ~/.config ~/cfg` was allowed (~/.config matches nothing
@@ -96,6 +101,9 @@ profile prometheus-bash flags=(attach_disconnected) {
   # a shell must not. The trailing * covers the schedule's .tmp and .corrupt side files: the daemon's
   # open(tmp, "w") follows a symlink, so a planted one would redirect its write. `l` refuses the link itself.
   deny @{HOME}/.prometheus/data/cron_{jobs.json,history.jsonl,undelivered.jsonl,scheduler.pid}* wl,
+  # The pause-everything state (engine/pause.py), read at boot: a shell that deleted or rewrote it would undo an
+  # emergency stop at the next restart. By prefix, so the daemon's pause.json.*.tmp files are covered too.
+  deny @{HOME}/.prometheus/data/pause.json* wl,
   deny @{HOME}/.prometheus/data/  w,
   deny @{HOME}/.prometheus/       w,
 
@@ -184,4 +192,15 @@ profile prometheus-bash flags=(attach_disconnected) {
   # any path. Note that ssh also reads ~/.ssh/known_hosts, which is denied
   # above, so UserKnownHostsFile has to move with the key or ssh fails at
   # host-key verification rather than at the key. Both measured.
+
+  # --- MACHINE-LOCAL RULES -------------------------------------------------
+  # An owner's own folders (a backup folder, a mounted drive) are not this
+  # project's to name, and a rule added by hand to the installed profile is
+  # lost the next time a release installs this one. Put them in
+  # /etc/apparmor.d/local/prometheus-bash, which a deploy never replaces:
+  # rules only, no braces, e.g.  deny @{HOME}/backups/{,**} rwlkmx,
+  # `include if exists`, so a machine without the file is unaffected. Parsed
+  # last; `deny` beats any allow whatever its position, so this cannot loosen
+  # a rule above it, only add to it.
+  include if exists <local/prometheus-bash>
 }

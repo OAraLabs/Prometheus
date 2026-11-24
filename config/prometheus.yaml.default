@@ -448,6 +448,11 @@ security:
     - "/*/.prometheus/node"
     - "/*/.prometheus/data/mcp_servers.json*"
     - "/*/.prometheus/xai_oauth.json*"   # the xAI OAuth tokens
+    # The pause-everything state (read at boot; removing it would undo an emergency stop at the next restart).
+    - "/*/.prometheus/data/pause.json*"
+    # The credentials folder, whole: the env file, its backups (`env.bak-<date>`), the APNs signing key
+    # (`AuthKey_<id>.p8`, push.apns.key_path) and any token beside them. The configuration lives in ~/.prometheus.
+    - "/*/.config/prometheus"
   # THE ABOVE DOES NOT COVER bash. denied_paths is only consulted when a call
   # passes a file_path, and bash is handed a command string — so at BOTH
   # origins `cat ~/.ssh/id_*` is ALLOW. Measured, not inferred. Any check on
@@ -918,7 +923,7 @@ router:
 # (claude-sonnet-4-5-20250929). Anthropic pre-4.6 aliases resolve
 # server-side; 4.6+ IDs are already dateless pinned snapshots. For
 # OpenAI / Gemini / xAI use the model name the provider exposes
-# (e.g. gpt-5.6-luna, gemini-2.5-pro, grok-4.5).
+# (e.g. gpt-5.6-luna, gemini-3.8-flash, grok-4.5).
 #
 # COST NOTE: a model with no row in src/prometheus/telemetry/cost.py PRICING
 # still runs — it just cannot be priced, and /status will say so rather than
@@ -939,7 +944,7 @@ slash_commands:
   gemini:
     provider: gemini
     api_key_env: GEMINI_API_KEY
-    model: gemini-2.5-flash
+    model: gemini-3.5-flash-lite
   xai:
     provider: xai
     api_key_env: XAI_API_KEY
@@ -1297,6 +1302,17 @@ web:
   # is ignored with a warning. If a proxy on this machine fronts the daemon and
   # is not named here, every request looks like it comes from 127.0.0.1.
   trusted_proxies: []
+
+  # Extra names this daemon answers to for the v2 identity challenge, which binds
+  # the host a client dialled into what the daemon signs. The daemon already
+  # counts as its own: loopback, the local address the connection arrived on,
+  # this machine's host name and `<name>.local`. Add a name a client uses that
+  # is none of those, e.g. a Tailscale name ["my-server.tail1234.ts.net"] or a
+  # reverse proxy's public name (the proxy must pass the Host header on). A name
+  # that is not listed here is refused with 421 `host_not_mine`, on purpose: a
+  # relay at another name must not get a signature for it. Names are never
+  # looked up in DNS. Plain host names or IP addresses only, no port.
+  identity_hosts: []
 
 # Image generation — the image_generate tool's backend selection + per-backend
 # settings. CLOUD EXPANSION (2026-07) adds the PAID DashScope backend (WAN 2.5).
@@ -1697,6 +1713,14 @@ vault:
 doctor:
   startup_check: true
   registry_file: config/model_registry.yaml
+
+# ── Chat projects ─────────────────────────────────────────────────────────
+# A chat project is a named folder with standing instructions (PROMETHEUS.md) and reference files; conversations
+# filed in it work in that folder (docs/design/chat-projects.md). Projects created without a folder get one here.
+projects:
+  # Where managed project folders are made. A visible folder in your home directory, not inside the agent's
+  # workspace. Created on first use with mode 0700. Must not be under security.denied_paths.
+  root: "~/prometheus-projects"
 
 # ── Managed tasks ─────────────────────────────────────────────────────────
 tasks:

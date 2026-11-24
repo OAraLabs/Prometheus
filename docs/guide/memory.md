@@ -41,6 +41,8 @@ Two plain markdown files ride every system prompt:
 
 The agent reads and edits these itself over time. You can inspect them at any point with the `/memory` command, or in Beacon under **Config → Memory**. Because they are size-bounded, the agent has to keep them curated rather than letting them grow without limit.
 
+The agent changes them only with your approval. Every add, replace or remove its `memory` tool makes goes to your approval queue (Telegram `/approve`, Beacon), showing the exact entry and, for a replace, the text it replaces. That holds in every permission mode, and an earlier approval never covers the next change. `/approve all` leaves these alone, and the phone notification for one carries no content, because the entry is your own words: open Beacon or Telegram to read it. An entry is one line of at most 400 characters, so the prompt always shows the whole of it. A remove or replace changes exactly one entry, the one the prompt shows; if the text matches several, nothing changes. An add never drops an older entry to make room: when the file is full, remove or replace one first. If memory changed between the prompt and your answer (another approval, an edit in Beacon), the change is refused and the agent asks again. With no way to ask you, the change is refused; the interactive CLI has no approval prompt, so memory changes from it are refused too. Reading the files (`list`) needs no approval. With `memory.extraction.enabled: false` the tool isn't offered at all.
+
 Both files are read again at the start of every turn, so a change reaches the model on your next message with no restart. That holds whether the agent made it, you made it in Beacon, or you edited the file by hand. A change made partway through a turn applies from the next turn. If neither file changed, the system prompt is byte-for-byte the same, so a provider's prompt cache is not disturbed.
 
 ### Editing memory remotely
@@ -56,6 +58,17 @@ You can also edit both files yourself, from anywhere the API reaches — `PUT /a
 **Default: on** (config: `memory.extraction.enabled`)
 
 Roughly every 30 minutes, a background pass mines recent conversations into structured facts, organized by entity (a person, a client, a project, a topic) and tagged with a confidence score. These facts land in `memory.db` and become the raw material for passive recall and the wiki. Machine-generated sessions (automated jobs, evals) are excluded so the fact store reflects real conversations, not the system talking to itself.
+
+It learns only from your own messages, and only from the words you typed in them:
+
+- The assistant's replies are not mined: a reply can repeat a tool's result (a CV, an email, a web page) or something read earlier in the conversation. Facts you state are in your own message.
+- Tool results, a task's output, a group member's messages and a scoped device's messages (an approved phone, a server-to-server caller) are not mined.
+- What a message carries besides your words is not something you said: an uploaded document's text (`[Content of …]`), a picture or sticker's description, a note about an attachment, and an `@` reference in Beacon (a file, a diff, a page). Only your own text in that message is mined.
+
+Two limits:
+
+- **Forwarded or pasted text counts as yours.** Prometheus can tell what a tool, an upload or another sender put in a message, but not text you paste or forward into your own message: that reads as something you said, and it is learned from like your own words. If you paste someone else's text, say whose it is, or remove what you don't want kept in the memory editor afterwards.
+- **Your own text that looks like an attachment marker is left out.** A line you type that looks like `[Content of …]:`, `[Image: …]` or `[The user sent …]` is treated as an attachment, not as your words.
 
 ### Turning learning off
 

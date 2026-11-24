@@ -38,6 +38,13 @@ class _Store:
     def push_targets(self):
         return [SimpleNamespace(id="d1", apns_token="t", environment="sandbox", bundle_id="", push_failures=0)]
 
+    # Approval and quiet pushes go to owner devices (and a session's own device) only: the one device here is the owner's.
+    def approval_push_targets(self, *, desktop):
+        return self.push_targets()
+
+    def quiet_push_targets(self, session_id=None):
+        return self.push_targets()
+
     def activity_targets(self, session_id):
         return [(self.push_targets()[0], "activity-token")]
 

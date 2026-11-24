@@ -87,11 +87,27 @@ def _daemon_boot(cwd: Path) -> tuple[str, str | None]:
     return prompt, memory_section(content)
 
 
+class _OwnerSaysYes:
+    """A gate whose approval channel is an owner who approves: every memory change asks (GHSA-f68r-xfv4-83fr)."""
+
+    def __init__(self, cwd: Path) -> None:
+        from prometheus.permissions.checker import SecurityGate
+
+        self._gate = SecurityGate(workspace_root=str(cwd))
+
+    def __getattr__(self, name):
+        return getattr(self._gate, name)
+
+    async def request_approval(self, tool_name, reason, arguments=None) -> bool:
+        return True
+
+
 def _gateway_loop(provider, cwd: Path, boot_section: str | None) -> AgentLoop:
-    """Shaped like daemon.py's AgentLoop (Telegram/Slack/Discord/REST)."""
+    """Shaped like daemon.py's AgentLoop (Telegram/Slack/Discord/REST), with an owner who approves."""
     return AgentLoop(
         provider=provider, model="stub", tool_registry=_registry(), cwd=cwd,
         boot_memory_prompt=boot_section, memory_prompt_builder=memory_section,
+        permission_checker=_OwnerSaysYes(cwd),
     )
 
 

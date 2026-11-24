@@ -36,6 +36,11 @@ WAIT_SECONDS = 1800 + 120
 _TOKEN: list[str | None] = [None]
 
 
+def _plain(text: str) -> str:
+    """*text* with a lone surrogate written out, so the body can be UTF-8."""
+    return str(text).encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def set_worker_token(token: str | None) -> None:
     """The token this worker asks with (read from its stdin by cli/worker.py)."""
     _TOKEN[0] = token or None
@@ -71,16 +76,16 @@ def approval_prompt_from_env(
     async def ask(tool_name: str, reason: str, arguments: dict[str, Any] | None = None) -> bool:
         import httpx
 
-        from prometheus.permissions.argument_view import redact_arguments
+        from prometheus.permissions.argument_view import bound_for_wire
 
         token = _TOKEN[0]
         if not token:
             log.warning("worker approval for %s: no token to ask with — denied", tool_name)
             return False
-        # Redacted and truncated here, as the queue would: the card shows no
-        # more than this, and a whole file body would not fit the daemon's cap.
-        body = {"tool_name": tool_name, "reason": reason,
-                "arguments": redact_arguments(arguments)}
+        # Bounded here, rendered ONCE by the daemon's queue: a whole file body would not fit the daemon's cap, and a view
+        # rendered twice is cut, noted and renamed twice.
+        body = {"tool_name": _plain(tool_name)[:200], "reason": _plain(reason)[:1500],
+                "arguments": bound_for_wire(arguments)}
         try:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(10.0, read=WAIT_SECONDS),

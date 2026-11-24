@@ -53,6 +53,14 @@ EXPECTED_SCOPED_ALLOWED = {
     ("GET", "/api/events/recent"),
     ("GET", "/api/activity/recent"),
     ("POST", "/api/search"),
+    # chat projects: only those its own sessions are in, as id and name (the handlers filter)
+    ("GET", "/api/chat-projects"),
+    ("GET", "/api/chat-projects/{project_id}"),
+    # speech, with chat's limits: a session's reply only for a session it owns (the session path guard)
+    ("GET", "/api/speech"),
+    ("POST", "/api/speech/transcribe"),
+    ("POST", "/api/speech/speak"),
+    ("GET", "/api/sessions/{session_id}/speech"),
     # the one desktop route open to every valid token: a stop can only end a task
     ("POST", "/api/computer/tasks/{task_id}/stop"),
     # the tool calls of its own sessions: seen and denied; approving is the owner's (or a marked device's, for a
@@ -60,6 +68,7 @@ EXPECTED_SCOPED_ALLOWED = {
     ("GET", "/api/approvals"),
     ("POST", "/api/approvals/{request_id}/approve"),
     ("POST", "/api/approvals/{request_id}/deny"),
+    ("GET", "/api/pause"),                     # paused + since only (2026-11-13, phone item 4b)
 }
 
 

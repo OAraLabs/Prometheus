@@ -156,7 +156,11 @@ class PushDispatcher:
         is the node's own public key, added by ``_named`` to every body, so a phone paired with several Prometheus
         instances knows which one is pushing.
         """
-        if payload.get("task_id") is not None:
+        from prometheus.permissions.approval_queue import PRIVATE_APPROVAL_TOOLS
+
+        # A MEMORY CHANGE'S PROMPT (GHSA-f68r-xfv4-83fr): its description is the entry itself, the owner's own
+        # words, so it gets the desktop prompt's body: no content and no APPROVAL category.
+        if payload.get("task_id") is not None or payload.get("tool_name") in PRIVATE_APPROVAL_TOOLS:
             # A DESKTOP TASK'S PROMPT (computer-use v1.1 §5.2.2): no content
             # at all — not the tool, not the app, not the element, not the
             # text. And no APPROVAL category: a lock screen that cannot show
@@ -173,7 +177,7 @@ class PushDispatcher:
                 "expires_at": payload.get("expires_at"),
             }
             desk = self._named(desk)
-            for target in self._store.push_targets():
+            for target in self._approval_targets(desktop=True):
                 await self._deliver(target, desk)
             return
         body = {
@@ -195,8 +199,18 @@ class PushDispatcher:
             "expires_at": payload.get("expires_at"),
         }
         body = self._named(body)
-        for target in self._store.push_targets():
+        for target in self._approval_targets(desktop=False):
             await self._deliver(target, body)
+
+    def _approval_targets(self, *, desktop: bool) -> list:
+        """Owner devices (plus, for a content-free desktop prompt, devices marked for computer use): see
+        ``DeviceStore.approval_push_targets``. A store that cannot say which devices are owners gets no approval
+        push at all, rather than one to every device."""
+        pick = getattr(self._store, "approval_push_targets", None)
+        if pick is None:
+            logger.warning("push: this device store cannot name owner devices; no approval push sent")
+            return []
+        return list(pick(desktop=desktop))
 
     async def _push_quiet(self, kind: str, payload: dict) -> None:
         live = self._live_device_ids()
@@ -216,7 +230,12 @@ class PushDispatcher:
             **({"task_id": _capped(payload["task_id"], ID_CAP)} if payload.get("task_id") else {}),
         }
         body = self._named(body)
-        for target in self._store.push_targets():
+        # Owner devices and the device whose session it is, nobody else: the body carries a line of content.
+        pick = getattr(self._store, "quiet_push_targets", None)
+        if pick is None:
+            logger.warning("push: this device store cannot scope a quiet push; none sent")
+            return
+        for target in pick(payload.get("session_id") or None):
             # The spec's core rule: a device watching over its socket needs no
             # push; a device whose socket died (backgrounded phone) does.
             if target.id in live:

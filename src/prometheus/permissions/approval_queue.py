@@ -20,6 +20,7 @@ from uuid import uuid4
 from prometheus.engine.tool_context import RUN_SESSION
 from prometheus.permissions.approver import Approver
 from prometheus.permissions.argument_view import (
+    MAX_ARGUMENTS,
     format_arguments,
     redact_arguments,
 )
@@ -207,7 +208,7 @@ def derive_grant(
     """
     from pathlib import Path as _Path
 
-    from prometheus.permissions.checker import Grant
+    from prometheus.permissions.checker import Grant, is_single_invocation
     from prometheus.permissions.computer_extent import COMPUTER_ACTION_KIND
 
     extent = action.grant_computer_action
@@ -291,7 +292,10 @@ def derive_grant(
             widened=bool(widen),
             scope=stored_scope_for(verb),
         )
-    if action.grant_command:
+    if action.grant_command and is_single_invocation(action.grant_command):
+        # A chained or substituting command is not offered: Grant.matches refuses it, so "always" would promise a
+        # remembered approval that never applies and write a dead row to the config. It falls through to rule 4:
+        # approve once, remember nothing, and say so.
         return Grant(
             kind="command_prefix",
             value=action.grant_command,
@@ -660,6 +664,11 @@ class ApprovalQueue:
         is identical to ``/approve`` and is pure noise carrying a multi-request
         verb, so it is omitted rather than described.
         """
+        if arguments and len(arguments) > MAX_ARGUMENTS:
+            # A call with this many arguments cannot be shown to a person, and an agent chooses their names: it is refused,
+            # not approved on a view that leaves some out.
+            logger.warning("approval for %s refused: %d arguments cannot be shown", tool_name, len(arguments))
+            return ApprovalResult.DENIED
         request_id = uuid4().hex[:8]
         action = PendingAction(
             request_id=request_id,
@@ -673,7 +682,7 @@ class ApprovalQueue:
             # row) renders the same already-safe mapping and none of them can
             # forget to scrub. Storing the raw dict and scrubbing per surface
             # is how one surface ends up echoing a secret.
-            arguments=redact_arguments(arguments),
+            arguments=redact_arguments(arguments, wire=worker_task_id is not None),
             session_id=session_id or RUN_SESSION.get(),
             once_only=once_only,
             worker_task_id=worker_task_id,
@@ -1134,6 +1143,16 @@ def is_desktop_request(action: Any) -> bool:
 def is_worker_request(action: Any) -> bool:
     """A spawned worker's request — answered on its own, like a desktop prompt."""
     return getattr(action, "worker_task_id", None) is not None
+
+
+#: Tools whose approval text IS the owner's private content (a memory entry): pushed with no content, and never
+#: part of "approve all" (GHSA-f68r-xfv4-83fr).
+PRIVATE_APPROVAL_TOOLS = frozenset({"memory"})
+
+
+def is_private_request(action: Any) -> bool:
+    """A request whose text is the owner's own content, read on its own and never pushed."""
+    return getattr(action, "tool_name", None) in PRIVATE_APPROVAL_TOOLS
 
 
 def is_hold_request(action: Any) -> bool:

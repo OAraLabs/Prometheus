@@ -39,6 +39,11 @@ class AgentProfile:
     # device's session). A hold has no fallback that widens it: the loop's "matches no tool, so ignore it"
     # rule, meant for a mistyped profile, does not apply, and a run that cannot resolve its hold gets none.
     held: bool = False
+    # True only for a CUSTOM profile whose YAML has the ``bootstrap_files`` key. A run the operator HOLDS to a profile
+    # loads only files its profile named: the default list above is the OWNER's three files, and the builtins
+    # list the owner's persona and instructions (``assistant`` its AGENTS.md); a profile that merely did not say,
+    # or a builtin, must not hand them to a restricted caller.
+    bootstrap_declared: bool = False
 
 
 # ------------------------------------------------------------------
@@ -128,6 +133,17 @@ _BUILTINS: dict[str, AgentProfile] = {
 # ------------------------------------------------------------------
 
 
+def profiles_dir() -> Path:
+    """Where custom profiles live: ``~/.prometheus/profiles/``. Creates nothing.
+
+    A profile's YAML and the bootstrap files a run HELD to it reads are both here, one folder that every write
+    floor (Seatbelt, AppArmor, the gate) already keeps a model-written shell out of.
+    """
+    from prometheus.config.paths import config_dir_path
+
+    return config_dir_path() / _PROFILES_DIR
+
+
 class ProfileStore:
     """Load builtin and custom profiles."""
 
@@ -160,6 +176,7 @@ class ProfileStore:
                     exclude_tools=data.get("exclude_tools", []),
                     subsystems=data.get("subsystems", {}),
                     max_tool_schemas=data.get("max_tool_schemas"),
+                    bootstrap_declared="bootstrap_files" in data,
                 )
                 self._profiles[profile.name] = profile
             except Exception:

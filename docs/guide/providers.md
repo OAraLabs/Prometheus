@@ -92,7 +92,7 @@ Every cloud provider except Anthropic rides the same OpenAI-compatible wire form
 |----------|-------------|---------|---------------|
 | OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-5.6-luna` |
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | `claude-haiku-4-5-20251001` |
-| Google Gemini | `gemini` | `GEMINI_API_KEY` | `gemini-2.5-flash` |
+| Google Gemini | `gemini` | `GEMINI_API_KEY` | `gemini-3.5-flash-lite` |
 | xAI (Grok) | `xai` | `XAI_API_KEY` *or* SuperGrok OAuth | `grok-4.5` |
 | DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-flash` |
 | Kimi (Moonshot) | `kimi` | `MOONSHOT_API_KEY` | `kimi-k2.6` |
@@ -158,7 +158,7 @@ slash_commands:
   gemini:
     provider: gemini
     api_key_env: GEMINI_API_KEY
-    model: gemini-2.5-pro
+    model: gemini-3.8-flash
   xai:
     provider: xai
     api_key_env: XAI_API_KEY

@@ -71,7 +71,8 @@ def test_a_home_path_cannot_break_out_of_the_profile():
     assert regexes and set(regexes) <= {
         r'#"/\.config/[^/]+/[^/]*env$"',
         r'#"/devices\.db[^/]*$"',
-        r'#"/cron_(jobs\.json|history\.jsonl|undelivered\.jsonl|scheduler\.pid)[^/]*$"',
+        # + pause.json (the pause-everything state, read at boot), in the same rule as the scheduled-jobs files
+        r'#"/(cron_(jobs\.json|history\.jsonl|undelivered\.jsonl|scheduler\.pid)|pause\.json)[^/]*$"',
         r'#"/mcp_servers\.json[^/]*$"',
         r'#"/xai_oauth\.json[^/]*$"',
         r'#"/lcm\.db[^/]*$"',
@@ -176,11 +177,12 @@ def test_the_real_floor_holds_for_a_home_path_with_awkward_characters(tmp_path, 
     home = (tmp_path.resolve() / name)
     (home / ".config" / "prometheus").mkdir(parents=True)
     (home / ".config" / "prometheus" / "env").write_text("PROMETHEUS_API_TOKEN=master\n")
-    (home / ".config" / "prometheus" / "settings.yaml").write_text("not a secret\n")
+    (home / ".config" / "other-app").mkdir()
+    (home / ".config" / "other-app" / "settings.yaml").write_text("not a secret\n")
     (home / ".ssh").mkdir()
     (home / ".ssh" / "id").write_text("PRIVATE\n")
     done = _sh(home, 'cat "$HOME/.config/prometheus/env" "$HOME/.ssh/id" 2>/dev/null; '
-                     'cat "$HOME/.config/prometheus/settings.yaml"')
+                     'cat "$HOME/.config/other-app/settings.yaml"')
     assert "master" not in done.stdout and "PRIVATE" not in done.stdout, done.stdout
     assert "not a secret" in done.stdout, ("the profile did not parse, or denied too much", done.stderr[-300:])
 
@@ -191,6 +193,21 @@ def test_the_real_floor_leaves_ordinary_work_alone(tmp_path):
     done = _sh(home, 'cat "$HOME/notes.txt" && echo made > "$HOME/out.txt" && cat "$HOME/out.txt" && ls "$HOME/.config"')
     assert done.returncode == 0, done.stderr
     assert done.stdout.split() == ["ordinary", "made", "prometheus"]
+
+
+@real
+def test_the_real_floor_refuses_everything_in_the_credentials_folder(tmp_path):
+    home = _scratch_home(tmp_path)
+    folder = home / ".config" / "prometheus"
+    (folder / "env.bak-2026-11-16").write_text("PROMETHEUS_API_TOKEN=copy\n")
+    (folder / "AuthKey_ABC.p8").write_text("SIGNING-KEY\n")
+    for script in ('cat "$HOME/.config/prometheus/env.bak-2026-11-16"',
+                   'cat "$HOME/.config/prometheus/AuthKey_ABC.p8"',
+                   'ls "$HOME/.config/prometheus"',
+                   'echo x > "$HOME/.config/prometheus/planted"'):
+        done = _sh(home, script)
+        assert "copy" not in done.stdout and "SIGNING-KEY" not in done.stdout and done.returncode != 0, script
+    assert not (folder / "planted").exists()
 
 
 @real

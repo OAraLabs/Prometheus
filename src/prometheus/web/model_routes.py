@@ -160,7 +160,7 @@ def register_model_routes(app: Any, *, auth_on: Callable[[], bool]) -> None:
     async def put_model(request: Request):
         if (refusal := operator_refusal(request, auth_on())) is not None:
             return refusal
-        from prometheus.config.env_file import set_env_value
+        from prometheus.config.env_file import EnvValueError, set_env_value
         from prometheus.providers import key_check
 
         path = getattr(request.app.state, "config_path", None)
@@ -223,6 +223,10 @@ def register_model_routes(app: Any, *, auth_on: Callable[[], bool]) -> None:
                     setattr(request.app.state, _KEY_PENDING, True)
             if plan.changed:
                 replace_config(plan.target, plan.updated)
+        except EnvValueError:
+            # The key itself was checked above, so this is the key variable's NAME (model.api_key_env in yaml).
+            return _json(400, {"error": ms.INVALID_KEY,
+                               "detail": "the key variable's name is not one the env file can hold"})
         except (OSError, PersistError) as exc:
             logger.warning("model: could not save: %s", type(exc).__name__)
             return _json(500, {"error": ms.PERSIST_FAILED, "detail": "could not write the settings"})

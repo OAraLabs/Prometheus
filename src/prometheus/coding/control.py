@@ -157,6 +157,18 @@ def read_state_for_write(path: Path) -> ControlState:
 
 
 def write_state(path: Path, state: ControlState) -> None:
-    """Persist control state (daemon side). Creates the control dir if needed."""
+    """Persist control state (daemon side). Creates the control dir if needed.
+
+    Atomic (a temp file renamed over), so the run polling it every half second never reads half a file: a torn
+    read parsed as "not paused" would let a paused run go on (pause everything writes this file too).
+    """
+    import os
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(serialize_control(state), encoding="utf-8")
+    tmp = path.with_name(f".{path.name}.{os.urandom(4).hex()}.tmp")
+    try:
+        tmp.write_text(serialize_control(state), encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
