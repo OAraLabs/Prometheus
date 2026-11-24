@@ -31,9 +31,12 @@ Apple rate-limits liveactivity pushes; the 3s cadence is for a live socket.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import logging
 import re
 import time
+from collections.abc import Callable
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -50,6 +53,33 @@ _QUIET_KINDS = {
 }
 
 
+def _node_pub_now() -> str | None:
+    from prometheus.config.node_identity import get_node_pubkey
+
+    return get_node_pubkey()
+
+
+def _is_node_pub(value: Any) -> bool:
+    """Whether *value* is a node public key as the daemon states it everywhere (``/api/status``, the identity
+    challenge): the base64 of exactly 32 raw bytes, written the way ``b64encode`` writes it."""
+    if not isinstance(value, str) or len(value) != 44:
+        return False
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return len(raw) == 32 and base64.b64encode(raw).decode("ascii") == value
+
+
+#: APNs refuses a body over 4096 bytes (PayloadTooLarge), and an approval that never arrives blocks a turn. Every
+#: caller-sized string a body carries is capped; ``test_push_carries_node_pub`` builds every body with long ones.
+TOOL_NAME_CAP = 100
+ID_CAP = 200
+
+
+def _capped(value: Any, cap: int) -> Any:
+    return value[:cap] if isinstance(value, str) else value
+
 #: "owner in Telegram (telegram:<id>)": the chat account's id stays on the daemon (``/api/status``), out of a push.
 _CHAT_ACCOUNT = re.compile(r"\s*\((?:telegram|slack|discord):[^)]*\)\s*$")
 
@@ -63,11 +93,14 @@ class PushDispatcher:
     """Decides who gets pushed what. The sender sends; the store remembers."""
 
     def __init__(self, store: Any, sender: Any, bridge: Any,
-                 now: Any = time.time) -> None:
+                 now: Any = time.time,
+                 node_pub: Callable[[], str | None] | None = None) -> None:
         self._store = store
         self._sender = sender
         self._bridge = bridge
         self._now = now
+        # Which node is pushing (see ``_named``). Injectable so a test need not own a key.
+        self._node_pub = node_pub or _node_pub_now
         # session_id -> wall time of the last liveactivity push.
         self._activity_pushed_at: dict[str, float] = {}
         # Devices whose 410 has been logged — "logs once", per the spec.
@@ -90,6 +123,27 @@ class PushDispatcher:
             # down with it.
             logger.warning("push dispatch failed", exc_info=True)
 
+    def node_pub(self) -> str | None:
+        """This node's public key if it has one and it is well formed, else ``None``. Never raises."""
+        try:
+            value = self._node_pub()
+        except Exception:
+            logger.warning("push: the node key could not be read; pushing without it", exc_info=True)
+            return None
+        return value if _is_node_pub(value) else None
+
+    def _named(self, body: dict) -> dict:
+        """*body* with ``node_pub`` added: every push says which node sent it.
+
+        A phone paired with several Prometheus instances gets pushes from each, and nothing else in a body says
+        which. The node's public key is what it pinned when it paired (``/api/status``, the identity challenge).
+        Public by nature, so it is safe in front of Apple; left out, never guessed at, when the node has no key.
+        Added where each body is BUILT, not where it is sent, so the key-set review in
+        ``tests/test_approval_push_fanout.py`` sees it.
+        """
+        pub = self.node_pub()
+        return {**body, "node_pub": pub} if pub else body
+
     async def _push_approval(self, payload: dict) -> None:
         """Fan one pending approval out to EVERY registered device.
 
@@ -105,6 +159,10 @@ class PushDispatcher:
         and ``extents``; neither is read here and neither should be.
         ``test_approval_push_body_stays_narrow`` fails the build if this set
         changes, so widening it is a decision someone makes on purpose.
+
+        ``node_pub`` (added on purpose; ``tests/test_push_carries_node_pub.py``) is not read from ``payload``: it
+        is the node's own public key, added by ``_named`` to every body, so a phone paired with several Prometheus
+        instances knows which one is pushing.
         """
         from prometheus.permissions.approval_queue import PRIVATE_APPROVAL_TOOLS
 
@@ -123,9 +181,10 @@ class PushDispatcher:
                     "sound": "default",
                     "interruption-level": "time-sensitive",
                 },
-                "request_id": payload.get("request_id"),
+                "request_id": _capped(payload.get("request_id"), ID_CAP),
                 "expires_at": payload.get("expires_at"),
             }
+            desk = self._named(desk)
             for target in self._approval_targets(desktop=True):
                 await self._deliver(target, desk)
             return
@@ -137,7 +196,7 @@ class PushDispatcher:
             "aps": {
                 "alert": {
                     "title": "Approval required",
-                    "body": f"{payload.get('tool_name', 'a tool')} — "
+                    "body": f"{_capped(payload.get('tool_name', 'a tool'), TOOL_NAME_CAP)} — "
                             f"{first_line(str(payload.get('description') or ''))}",
                 },
                 **({} if critical else {"category": "APPROVAL"}),
@@ -147,11 +206,12 @@ class PushDispatcher:
                 "interruption-level": "time-sensitive",
                 "mutable-content": 1,
             },
-            "request_id": payload.get("request_id"),
-            "tool_name": payload.get("tool_name"),
+            "request_id": _capped(payload.get("request_id"), ID_CAP),
+            "tool_name": _capped(payload.get("tool_name"), TOOL_NAME_CAP),
             "expires_at": payload.get("expires_at"),
             **({"critical": True} if critical else {}),
         }
+        body = self._named(body)
         for target in self._approval_targets(desktop=False):
             await self._deliver(target, body)
 
@@ -183,14 +243,14 @@ class PushDispatcher:
             return
         live = self._live_device_ids()
         who = _CHAT_ACCOUNT.sub("", first_line(str(getattr(info, "by", "") or ""), cap=80)) or "someone"
-        body = {
+        body = self._named({
             "aps": {
                 "alert": {"title": "Prometheus paused",
                           "body": f"Paused by {who}. Nothing runs until a person resumes it."},
                 "sound": "default",
             },
             "paused_since": getattr(info, "since", None),
-        }
+        })
         targets = [t for t in self._store.push_targets() if t.id in owners and t.id not in live]
         results = await asyncio.gather(*(self._deliver(t, body) for t in targets), return_exceptions=True)
         for target, result in zip(targets, results):
@@ -211,9 +271,10 @@ class PushDispatcher:
                 "category": category,
                 "sound": "default",
             },
-            **({"session_id": payload["session_id"]} if payload.get("session_id") else {}),
-            **({"task_id": payload["task_id"]} if payload.get("task_id") else {}),
+            **({"session_id": _capped(payload["session_id"], ID_CAP)} if payload.get("session_id") else {}),
+            **({"task_id": _capped(payload["task_id"], ID_CAP)} if payload.get("task_id") else {}),
         }
+        body = self._named(body)
         # Owner devices and the device whose session it is, nobody else: the body carries a line of content.
         pick = getattr(self._store, "quiet_push_targets", None)
         if pick is None:
@@ -250,7 +311,7 @@ class PushDispatcher:
                     "chars": payload.get("chars", 0),
                 },
             }}
-            await self._deliver_activity(targets, body)
+            await self._deliver_activity(targets, self._named(body))
         except Exception:
             logger.warning("liveactivity push failed", exc_info=True)
 
@@ -268,7 +329,7 @@ class PushDispatcher:
                                   "elapsedS": payload.get("elapsed_s", 0),
                                   "toolCalls": 0, "chars": 0},
             }}
-            await self._deliver_activity(targets, body)
+            await self._deliver_activity(targets, self._named(body))
             self._activity_pushed_at.pop(session_id, None)
             for target, _token in targets:
                 self._store.clear_activity_token(target.id, session_id)

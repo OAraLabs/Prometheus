@@ -1116,6 +1116,12 @@ class WebSocketBridge:
 
         caps = ["voice_input"] if media_services.voice_input_available(self.config) else []
         caps += ["speech"] if speech_configured(self.config) else []
+        # Pushes carry this node's public key (push/dispatcher.py), so a client paired with several Prometheus
+        # instances knows which sent one. Listed only when true: push is on and the node has a key. A daemon
+        # without it does not send the field, and a client must not wait for it.
+        dispatcher = getattr(self, "push_dispatcher", None)
+        if dispatcher is not None and dispatcher.node_pub():
+            caps.append("push_node_pub")
         caps.append("pause")          # PUT/DELETE /api/pause, `paused` on /api/status (engine/pause.py)
         caps.append("plans")          # subscription plans on /api/providers/keys (providers/plans.py)
         from prometheus.security.git_read import capability_ready

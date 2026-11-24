@@ -38,9 +38,12 @@ from prometheus.permissions.approval_queue import ApprovalQueue, PendingAction
 from prometheus.permissions.checker import SecurityGate
 
 #: What the APNs body is allowed to carry, top level. Reviewed 2026-09-19.
+#: `node_pub` (reviewed 2026-11-11, Beacon iOS "Piece 14"): the node's own PUBLIC key, which `/api/status` and the
+#: identity challenge already publish, so a phone paired with several instances knows which one is pushing. It
+#: comes from the node identity, not from the approval payload, so ALLOWED_PAYLOAD_READS below is unchanged.
 #: `critical` (reviewed 2026-11-12, Beacon iOS "Piece 15"): a boolean the daemon computed (permissions/critical.py),
 #: sent only as `true`, saying "answer this in the app"; it carries nothing about the call.
-ALLOWED_TOP_LEVEL = {"aps", "request_id", "tool_name", "expires_at", "critical"}
+ALLOWED_TOP_LEVEL = {"aps", "request_id", "tool_name", "expires_at", "critical", "node_pub"}
 
 #: Which keys of the serialized approval the push path may READ. `arguments`
 #: and `extents` are deliberately absent: the first is the text a tool was
