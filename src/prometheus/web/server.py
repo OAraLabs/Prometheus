@@ -6546,11 +6546,13 @@ def create_app(
             if len(value) > _KEY_VALUE_MAX_CHARS:
                 return JSONResponse(status_code=400, content={
                     "error": f"value for {name} is implausibly long"})
-            if any(ord(ch) < 0x20 for ch in value):
+            from prometheus.config.env_file import env_value_problem
+
+            if problem := env_value_problem(value):
                 # The env file is line-based — a control character (esp. \n)
                 # in a value could inject a second VAR= assignment.
                 return JSONResponse(status_code=400, content={
-                    "error": f"value for {name} contains control characters"})
+                    "error": f"value for {name} {problem}"})
             cleaned[name] = value
 
         # A plan, when one is sent, is saved TOGETHER with the key: a plan's host takes only that plan's key, so

@@ -133,6 +133,17 @@ _BUILTINS: dict[str, AgentProfile] = {
 # ------------------------------------------------------------------
 
 
+def profiles_dir() -> Path:
+    """Where custom profiles live: ``~/.prometheus/profiles/``. Creates nothing.
+
+    A profile's YAML and the bootstrap files a run HELD to it reads are both here, one folder that every write
+    floor (Seatbelt, AppArmor, the gate) already keeps a model-written shell out of.
+    """
+    from prometheus.config.paths import config_dir_path
+
+    return config_dir_path() / _PROFILES_DIR
+
+
 class ProfileStore:
     """Load builtin and custom profiles."""
 
