@@ -86,6 +86,14 @@ STATUS_ARGS: tuple[str, ...] = (
 )
 
 TIME_LIMIT_S = 4.0
+#: How long a killed command is waited for.
+REAP_S = 2.0
+#: The in-process listing of a git folder is bounded: more entries than this, or a listing that takes longer, is
+#: refused (a real git folder holds a few dozen names).
+GIT_DIR_ENTRIES = 5000
+STORE_FACTS_S = 3.0
+#: At most this many reads queued behind the running ones; more are answered ``too_slow`` at once.
+MAX_WAITING = 16
 OUTPUT_LIMIT = 4 * 1024 * 1024
 MAX_ENTRIES = 5000
 #: The walk of refs/ and objects/ for links is bounded too.
@@ -117,6 +125,9 @@ def read_env(home: str | None = None) -> dict[str, str]:
 
 _git_program: str | None = None
 _git_checked = False
+#: ``--path-format=absolute`` needs git 2.31; an older one answers every read with an error, so it is not served.
+_git_version_ok = True
+MIN_GIT = (2, 31)
 
 
 def _find_git() -> str | None:
@@ -208,10 +219,13 @@ async def run(argv: list[str], cwd: str, env: dict[str, str], *, script: str | N
                 return
             chunks.append(data)
 
-    try:
-        await asyncio.wait_for(pump(), timeout)
+    async def finish() -> None:
+        await pump()
         if not result.too_big:
-            await asyncio.wait_for(proc.wait(), max(0.1, timeout))
+            await proc.wait()
+
+    try:
+        await asyncio.wait_for(finish(), timeout)          # one deadline for the whole command
     except asyncio.TimeoutError:
         result.timed_out = True
     except asyncio.CancelledError:
@@ -222,7 +236,7 @@ async def run(argv: list[str], cwd: str, env: dict[str, str], *, script: str | N
     if result.timed_out or result.too_big:
         _kill_group(proc)
         with contextlib.suppress(Exception):
-            await proc.wait()
+            await asyncio.wait_for(proc.wait(), REAP_S)     # a process stuck in the kernel does not hold the slot
     else:
         result.code = proc.returncode
         # Anything the program left behind in its group goes with it.
@@ -235,6 +249,9 @@ async def run(argv: list[str], cwd: str, env: dict[str, str], *, script: str | N
 _PROBE = [SH, "-c", f"{SH} -c 'exit 0'; echo started:$?"]
 _enforced: bool | None = None
 _enforced_lock: asyncio.Lock | None = None
+#: When the self-test could not tell, it is not asked again for this long (each ask can take 20 s).
+UNKNOWN_S = 300.0
+_unknown_until = 0.0
 
 
 async def fork_limit_enforced() -> bool:
@@ -242,7 +259,7 @@ async def fork_limit_enforced() -> bool:
     once with no limit (it must start its child), then under the limit (it must not). Root, a container that does
     not count processes per user, or a limit ``sh`` cannot set: not enforced, and git is not read here. A probe that
     could not run at all is "not known" and is asked again next time."""
-    global _enforced, _enforced_lock
+    global _enforced, _enforced_lock, _unknown_until
     if _enforced is not None:
         return _enforced
     if _enforced_lock is None:
@@ -251,34 +268,62 @@ async def fork_limit_enforced() -> bool:
         if _enforced is not None:
             return _enforced
         env = read_env()
+        if time.monotonic() < _unknown_until:
+            return False
         free = await run(_PROBE, "/", env, script='exec "$@"', timeout=10)
         if free.code != 0 or not re.search(rb"^started:0$", free.out, re.M):
+            _unknown_until = time.monotonic() + UNKNOWN_S
             return False
         limited = await run(_PROBE, "/", env, timeout=10)
         if limited.timed_out or limited.code is None:
+            _unknown_until = time.monotonic() + UNKNOWN_S      # not known, not kept; asked again in a while
             return False
-        _enforced = limited.code != NO_FORK_UNSET and b"started:0" not in limited.out
+        if limited.code == NO_FORK_UNSET:
+            _enforced = False                                   # sh could not lower the limit
+            return False
+        # A POSITIVE signal that the child was refused: the shell reports a failed start (``started:N``, N not 0), or
+        # dies of the refused fork before it can say anything (dash: "Cannot fork", exit 2; bash 3.2: exit 128; or the
+        # usual 1, 254, 255). Any other end (killed, 126, 127) proves nothing about the limit and is "not known".
+        refused = bool(re.search(rb"^started:[1-9]\d*$", limited.out, re.M)) or (
+            limited.code in (1, 2, 128, 254, 255) and b"started:" not in limited.out)
+        started = b"started:0" in limited.out
+        if started:
+            _enforced = False
+        elif refused:
+            _enforced = True
+        else:
+            _unknown_until = time.monotonic() + UNKNOWN_S
+            return False
         return _enforced
 
 
 def capability_ready() -> bool:
     """Whether ``git/1`` may be advertised: the self-test found the limit enforced here AND a git was found. Only what
     is already known: this never runs anything, so it is safe to ask from a frame handler."""
-    return _enforced is True and _git_checked and _git_program is not None
+    return _enforced is True and _git_checked and _git_program is not None and _git_version_ok
 
 
 async def prepare() -> bool:
     """The startup self-test: find git, and prove the limit. Whether ``git/1`` may be advertised."""
-    await asyncio.to_thread(git_program)
+    global _git_version_ok
+    git = await asyncio.to_thread(git_program)
+    if git is not None:
+        got = await run([git, "--version"], "/", read_env())
+        m = re.search(rb"git version (\d+)\.(\d+)", got.out)
+        _git_version_ok = m is not None and (int(m.group(1)), int(m.group(2))) >= MIN_GIT
+        if not _git_version_ok:
+            logger.warning("git is older than %d.%d (or its version could not be read): git status is not served",
+                           *MIN_GIT)
     await fork_limit_enforced()
     return capability_ready()
 
 
 def forget_probe() -> None:
     """Forget what the self-test found (tests)."""
-    global _enforced, _enforced_lock
+    global _enforced, _enforced_lock, _unknown_until
     _enforced = None
     _enforced_lock = None
+    _unknown_until = 0.0
 
 
 # ── what git said ────────────────────────────────────────────────────────────────────────────────────────────
@@ -304,8 +349,14 @@ class Counts:
 
 
 def _name(raw: str) -> str | None:
-    """A name git gave (branch, upstream): as written, but bounded, and never empty."""
-    return raw[:_NAME_MAX] if raw else None
+    """A name git gave (branch, upstream): bounded, never empty, and without the characters that are not part of what
+    a person reads (control, format and bidi characters, unassigned code points): a branch name is chosen by whoever
+    made the branch, the assistant included."""
+    import unicodedata
+
+    cleaned = "".join(c for c in unicodedata.normalize("NFC", raw) if unicodedata.category(c) not in
+                      ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp")).strip()
+    return cleaned[:_NAME_MAX] or None
 
 
 def parse_status(out: bytes | str) -> Counts | None:
@@ -386,6 +437,10 @@ def parse_where(out: bytes | str) -> tuple[str, str, str, bool] | None:
     if not (own or worktree or submodule):
         return None
     return top, git_dir, common, worktree
+
+
+_OPERATION_NAMES = ("rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer",
+                    "BISECT_LOG")
 
 
 def operation_of(names: list[str]) -> str | None:
@@ -492,23 +547,49 @@ def _links_under(root: str, deadline: float, budget: list[int]) -> list[str]:
     return found
 
 
+def _names(path: str) -> list[str]:
+    """The names directly inside a folder, at most ``GIT_DIR_ENTRIES`` of them (more is refused)."""
+    out: list[str] = []
+    with os.scandir(path) as it:
+        for e in it:
+            out.append(e.name)
+            if len(out) > GIT_DIR_ENTRIES:
+                raise _Walk
+    return out
+
+
 def _store_facts(git_dir: str, common: str) -> tuple[list[str], list[str], list[str]]:
     """What ``store_is_own`` is given: the names in ``<common>/objects/info``, the links directly inside each git
-    folder, and the links anywhere under refs and objects. Passive listing only: nothing is opened or followed."""
+    folder, and the links anywhere under refs and objects. Passive listing only: nothing is opened or followed, and
+    every listing is bounded. ``objects`` is looked at as a link BEFORE anything is listed under it."""
+    deep: list[str] = []
     info: list[str] = []
-    with contextlib.suppress(OSError):
-        info = os.listdir(f"{common}/objects/info")
+    objects = f"{common}/objects"
+    if os.path.islink(objects):
+        deep.append(objects)
+    else:
+        with contextlib.suppress(OSError):
+            info = _names(f"{objects}/info")
     top: list[str] = []
     for d in dict.fromkeys((common, git_dir)):
-        with contextlib.suppress(OSError), os.scandir(d) as it:
-            top.extend(e.path for e in it if e.is_symlink())
+        try:
+            with os.scandir(d) as it:
+                for n, e in enumerate(it):
+                    if n > GIT_DIR_ENTRIES:
+                        raise _Walk
+                    if e.is_symlink():
+                        top.append(e.path)
+        except _Walk:
+            raise
+        except OSError:
+            continue
     deadline = time.monotonic() + STORE_WALK_S
     budget = [STORE_WALK_LIMIT]
-    deep: list[str] = []
     for sub in ("refs", "objects"):
         path = f"{common}/{sub}"
         if os.path.islink(path):
-            deep.append(path)
+            if path not in deep:
+                deep.append(path)
         else:
             deep.extend(_links_under(path, deadline, budget))
     return info, top, deep
@@ -564,16 +645,34 @@ def forget_reads() -> None:
     _fresh.clear()
 
 
-async def _guarded(folder: str, top_allowed: Callable[[str], bool]) -> GitRead:
+def parallel() -> asyncio.Semaphore:
+    """The one limit on git reads running at once (status reads and pull request reads alike)."""
     global _sem
     if _sem is None:
         _sem = asyncio.Semaphore(MAX_PARALLEL)
-    async with _sem:
+    return _sem
+
+
+_waiting = 0
+
+
+async def _guarded(folder: str, top_allowed: Callable[[str], bool]) -> GitRead:
+    global _waiting
+    if _waiting >= MAX_WAITING:
+        return _unreadable(TOO_SLOW)           # too many reads queued: answered at once, not queued without bound
+    _waiting += 1
+    try:
+        await parallel().acquire()
+    finally:
+        _waiting -= 1
+    try:
         try:
             result = await _read(folder, top_allowed)
         except Exception:
             logger.warning("git read of a work folder failed", exc_info=True)
             result = _unreadable(NOT_READ)
+    finally:
+        parallel().release()
     result = replace(result, read_at=time.time())
     _fresh[folder] = (time.monotonic(), result)
     if len(_fresh) > 256:
@@ -594,6 +693,16 @@ async def read_git(folder: str, top_allowed: Callable[[str], bool], *, max_age: 
     hit = _fresh.get(folder)
     if hit is not None and time.monotonic() - hit[0] < max_age:
         return hit[1]
+    if max_age <= 0:
+        # A fresh read must not join one that started before the caller asked: a change made since then would be
+        # missed. Wait for it, then read again.
+        while (older := _inflight.get(folder)) is not None and not older.done():
+            with contextlib.suppress(Exception):
+                await asyncio.shield(older)
+            await asyncio.sleep(0)
+        stale = _inflight.get(folder)
+        if stale is not None and stale.done():
+            _inflight.pop(folder, None)
     task = _inflight.get(folder)
     if task is None:
         task = asyncio.ensure_future(_guarded(folder, top_allowed))
@@ -614,6 +723,13 @@ class Opened:
     env: dict[str, str]
     top: str
     git_dir: str
+
+    @property
+    def scope(self) -> tuple[str, ...]:
+        """Binds a later command to what was vetted: ``--git-dir`` and ``--work-tree`` are git's own answers (absolute
+        paths, one line each), so a ``core.worktree`` or a ``.git`` file the agent swaps in after the check is
+        ignored and ``status`` walks only the vetted top."""
+        return (f"--git-dir={self.git_dir}", f"--work-tree={self.top}")
 
 
 async def open_repo(folder: str, top_allowed: Callable[[str], bool]) -> Opened | GitRead:
@@ -646,8 +762,9 @@ async def open_repo(folder: str, top_allowed: Callable[[str], bool]) -> Opened |
         if back is None or not worktree_names_back(top, git_dir, back):
             return NONE
     try:
-        info, top_links, deep_links = await asyncio.to_thread(_store_facts, git_dir, common)
-    except _Walk:
+        info, top_links, deep_links = await asyncio.wait_for(
+            asyncio.to_thread(_store_facts, git_dir, common), STORE_FACTS_S)
+    except (_Walk, asyncio.TimeoutError):
         return _unreadable(TOO_SLOW)
     if not store_is_own(git_dir, common, info, top_links, deep_links):
         return _unreadable(NOT_READ)
@@ -658,7 +775,7 @@ async def _read(folder: str, top_allowed: Callable[[str], bool]) -> GitRead:
     opened = await open_repo(folder, top_allowed)
     if isinstance(opened, GitRead):
         return opened
-    st = await run([opened.git, *STATUS_ARGS], folder, opened.env)
+    st = await run([opened.git, *opened.scope, *STATUS_ARGS], folder, opened.env)
     if st.timed_out:
         return _unreadable(TOO_SLOW)
     if st.too_big:
@@ -668,9 +785,7 @@ async def _read(folder: str, top_allowed: Callable[[str], bool]) -> GitRead:
     parsed = parse_status(st.out)
     if parsed is None:
         return _unreadable(NOT_READ)
-    names: list[str] = []
-    with contextlib.suppress(OSError):
-        names = os.listdir(opened.git_dir)
+    names = [n for n in _OPERATION_NAMES if os.path.lexists(os.path.join(opened.git_dir, n))]
     state: dict[str, object] = {
         "branch": parsed.branch, "commit": parsed.commit, "upstream": parsed.upstream,
         "ahead": parsed.ahead if parsed.upstream else None, "behind": parsed.behind if parsed.upstream else None,

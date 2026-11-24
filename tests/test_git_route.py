@@ -220,6 +220,9 @@ class _Bridge:
     def operator_sockets_watching(self, sid: str):
         return ["ws"] if self.watching else []
 
+    def operator_watched_sessions(self):
+        return {SID} if self.watching else set()
+
     async def send_to_operators_watching(self, event, sid):
         if not self.watching:
             return 0
@@ -228,6 +231,11 @@ class _Bridge:
 
     async def broadcast(self, event):                       # must never be used for this frame
         self.broadcasts.append(event)
+
+
+async def _announced(watch) -> None:
+    """Take the baseline: the reading as it stands is what the last frame announced."""
+    watch._sent[SID] = git_routes.etag_of(await watch.snapshot(SID, fresh=True))
 
 
 @pytest.fixture
@@ -252,12 +260,13 @@ class TestTheFrame:
         assert "SECRET-FILE-NAME" not in json.dumps(frame) and "state" not in json.dumps(frame["payload"])
         assert watch.bridge.broadcasts == []                 # sent to the sockets directly: never the durable feed
 
-    async def test_what_a_client_fetched_is_what_it_knows(self, world, watch):
-        body = await watch.snapshot(SID)
-        watch.note_seen(SID, body)
-        assert await watch.check(SID) is False               # it already has this reading
+    async def test_a_fetch_by_one_client_does_not_hide_a_change_from_the_others(self, world, watch):
+        await watch.check(SID)                                # a frame announced this reading
+        watch.bridge.frames.clear()
         (world.repo / "x.txt").write_text("x\n")
-        assert await watch.check(SID) is True
+        git_read.forget_reads()
+        assert get(world).status_code == 200                  # another device fetched the new state first
+        assert await watch.check(SID) is True                 # the frame is still owed to the watchers
 
     async def test_nothing_is_sent_when_no_owner_device_is_watching(self, world, watch):
         watch.bridge.watching = False
@@ -267,7 +276,7 @@ class TestTheFrame:
         assert await watch.check(SID) is False and watch.bridge.frames == []
 
     async def test_a_turn_ending_a_tool_call_and_a_binding_change_re_read_and_a_burst_is_one_frame_per_window(self, world, watch):
-        watch.note_seen(SID, await watch.snapshot(SID))
+        await _announced(watch)
         (world.repo / "x.txt").write_text("x\n")
         for kind in ("chat_done", "tool_call_end", "tool_call_end"):
             watch.observe({"type": kind, "payload": {"session_id": SID}})
@@ -289,7 +298,7 @@ class TestTheFrame:
         assert not watch._pending
 
     async def test_the_slow_timer_reads_only_sessions_that_are_active_and_watched(self, world, watch):
-        watch.note_seen(SID, await watch.snapshot(SID))
+        await _announced(watch)
         (world.repo / "x.txt").write_text("x\n")
         await watch._tick()
         assert len(watch.bridge.frames) == 1
@@ -325,8 +334,11 @@ class TestTheFrame:
         git_pr.reset((str(gh),))
         quick = await watch.snapshot(SID, fresh=True, pr_wait=0.05)          # gh is slower than the wait
         assert quick["pr"] is None
-        watch.note_seen(SID, quick)
-        await asyncio.sleep(2.5)                                             # the lookup lands in the background
+        watch._sent[SID] = git_routes.etag_of(quick)
+        for _ in range(150):                                                 # the lookup lands in the background
+            if watch.bridge.frames:
+                break
+            await asyncio.sleep(0.1)
         assert watch.bridge.frames, "a pull request that turned up was not announced"
         again = await watch.snapshot(SID, fresh=True)
         assert again["pr"]["number"] == 12 and again["pr"]["url"] == "https://github.com/acme/site/pull/12"
@@ -372,3 +384,151 @@ class TestTheBridge:
         b._ws_identity[dead] = SimpleNamespace(is_operator=True)
         assert await b.send_to_operators_watching({"type": "x", "payload": {}}, SID) == 0
         assert dead not in b._clients
+
+
+class TestTheWatcherUnderLoad:
+    """What the correctness review reproduced: a change landing during a read, overlapping checks, the timer's window."""
+
+    async def test_two_checks_at_once_announce_one_change_once(self, world, watch):
+        await _announced(watch)
+        (world.repo / "x.txt").write_text("x\n")
+        results = await asyncio.gather(watch.check(SID, coalesce=False), watch.check(SID, coalesce=False))
+        assert sorted(results) == [False, True] and len(watch.bridge.frames) == 1
+
+    async def test_a_send_nobody_took_is_not_remembered_as_announced(self, world, watch):
+        await _announced(watch)
+        (world.repo / "x.txt").write_text("x\n")
+        watch.bridge.watching = False
+        assert await watch.check(SID, coalesce=False) is False
+        watch.bridge.watching = True
+        assert await watch.check(SID, coalesce=False) is True       # still owed
+
+    async def test_a_session_with_no_work_folder_is_not_announced_the_first_time(self, world, watch):
+        assert await watch.check("beacon:unbound", coalesce=False) is False and watch.bridge.frames == []
+
+    async def test_a_touch_while_a_re_read_is_running_is_read_again(self, world, watch, monkeypatch):
+        await _announced(watch)
+        real = watch.snapshot
+        gate = asyncio.Event()
+        calls = {"n": 0}
+
+        async def slow(sid, **kw):
+            calls["n"] += 1
+            body = await real(sid, **kw)
+            if calls["n"] == 1:
+                await gate.wait()                                   # the first read is held open
+            return body
+
+        monkeypatch.setattr(watch, "snapshot", slow)
+        watch.touch(SID)
+        await asyncio.sleep(0.15)                                   # the first re-read is now past its git read
+        (world.repo / "late.txt").write_text("x\n")                 # a change after that read
+        watch.touch(SID)                                            # ...and its tool call's touch
+        gate.set()
+        await asyncio.sleep(1.2)
+        assert calls["n"] >= 2 and watch.bridge.frames, "a change made during a read was not announced"
+        assert (await real(SID, fresh=True))["state"]["untracked"] == 1
+
+    async def test_a_fresh_read_does_not_join_one_that_started_before_the_change(self, world):
+        folder = str(world.repo)
+        allow = lambda top: True  # noqa: E731
+        git_read.forget_reads()
+        old = asyncio.ensure_future(git_read.read_git(folder, allow))      # in flight
+        await asyncio.sleep(0)
+        (world.repo / "after.txt").write_text("x\n")
+        fresh = await git_read.read_git(folder, allow, max_age=0.0)
+        await old
+        assert fresh.state["untracked"] == 1
+
+    async def test_the_timer_skips_a_session_that_just_had_a_frame(self, world, watch):
+        await _announced(watch)
+        (world.repo / "x.txt").write_text("x\n")
+        watch._active[SID] = time.monotonic()
+        watch._frame_at[SID] = time.monotonic()
+        await watch._tick()
+        assert watch.bridge.frames == []                            # inside the window: the next tick reads it
+        watch._frame_at[SID] = time.monotonic() - 10
+        await watch._tick()
+        assert len(watch.bridge.frames) == 1
+
+    def test_the_timer_reads_sessions_an_owner_socket_names_even_when_they_are_quiet_and_rotates_past_the_cap(self, world, watch):
+        watch.bridge.operator_watched_sessions = lambda: {f"s{i:02d}" for i in range(git_routes.TIMER_MAX + 5)}
+        first = watch._candidates()
+        second = watch._candidates()
+        assert len(first) == git_routes.TIMER_MAX and set(first) | set(second) >= {f"s{i:02d}" for i in range(git_routes.TIMER_MAX + 5)}
+
+    async def test_a_pull_request_that_lands_tells_every_session_waiting_on_that_folder(self, world, watch):
+        touched: list[str] = []
+        watch.touch = touched.append  # type: ignore[method-assign]
+        done = asyncio.get_running_loop().create_future()
+
+        async def lookup(folder, allow):
+            await done
+            return git_pr.PrRead("pr", {"number": 1})
+
+        import unittest.mock as mock
+
+        with mock.patch.object(git_pr, "read_pr", lookup):
+            state = {"branch": "main", "upstream": "origin/main"}
+            await watch._pr_for("s1", str(world.repo), state, wait=0.01)
+            await watch._pr_for("s2", str(world.repo), state, wait=0.01)
+            done.set_result(None)
+            await asyncio.sleep(0.05)
+        assert sorted(touched) == ["s1", "s2"]
+
+
+class TestTheWiring:
+    async def test_a_real_broadcast_of_a_turn_ending_reaches_an_owner_socket_as_the_frame_only(self, world, monkeypatch):
+        monkeypatch.setattr(git_routes, "SETTLE_S", 0.01)
+        monkeypatch.setattr(git_routes, "COALESCE_S", 0.05)
+        bridge = WebSocketBridge(loop_context=object(), config={})
+        got: list[dict] = []
+
+        class WS:
+            async def send(self, raw):
+                got.append(json.loads(raw))
+
+        ws = WS()
+        bridge._clients.add(ws)
+        bridge._ws_identity[ws] = SimpleNamespace(is_operator=True)
+        git_routes.attach_bridge(world.app, bridge)
+        (world.repo / "SECRET-FILE-NAME.txt").write_text("x\n")
+        await bridge.broadcast({"type": "chat_done", "payload": {"session_id": SID}})
+        await asyncio.sleep(1.5)
+        frames = [m for m in got if m["type"] == "workspace_git_changed"]
+        assert len(frames) == 1 and set(frames[0]["payload"]) == {"session_id", "read_at"}
+        assert "SECRET-FILE-NAME" not in json.dumps(got)
+        await world.app.state.git_watch.stop()
+
+    async def test_a_session_an_owner_socket_does_not_watch_gets_no_read(self, world, monkeypatch):
+        monkeypatch.setattr(git_routes, "SETTLE_S", 0.01)
+        bridge = WebSocketBridge(loop_context=object(), config={})
+
+        class WS:
+            async def send(self, raw):
+                raise AssertionError("nothing should be sent")
+
+        ws = WS()
+        bridge._clients.add(ws)
+        bridge._ws_identity[ws] = SimpleNamespace(is_operator=True)
+        bridge._ws_filters[ws] = {"beacon:another"}
+        git_routes.attach_bridge(world.app, bridge)
+        await bridge.broadcast({"type": "chat_done", "payload": {"session_id": SID}})
+        await asyncio.sleep(0.2)
+        assert not world.app.state.git_watch._pending
+
+    async def test_git_is_not_served_when_it_is_too_old_for_the_read(self, monkeypatch):
+        fake = git_read.Ran(code=0, out=b"git version 2.30.2\n")
+        real_run = git_read.run
+
+        async def run(argv, cwd, env, **kw):
+            return fake if argv[-1:] == ["--version"] else await real_run(argv, cwd, env, **kw)
+
+        monkeypatch.setattr(git_read, "run", run)
+        monkeypatch.setattr(git_read, "_git_checked", False)
+        git_read.forget_probe()
+        try:
+            assert await git_read.prepare() is False and not git_read.capability_ready()
+        finally:
+            monkeypatch.setattr(git_read, "run", real_run)
+            git_read._git_version_ok = True

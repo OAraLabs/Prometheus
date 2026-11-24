@@ -78,12 +78,17 @@ class GitWatch:
         self._config = config
         self._store = conversation_store
         self.bridge: Any = None
-        self._seen: dict[str, str] = {}            # session -> validator of what a client was last given
+        self._sent: dict[str, str] = {}            # session -> validator of the reading its last frame announced
         self._frame_at: dict[str, float] = {}      # session -> when its last frame went out (monotonic)
         self._active: dict[str, float] = {}        # session -> last activity (monotonic)
         self._pending: dict[str, asyncio.Task] = {}
+        self._dirty: set[str] = set()              # touched while a re-read was running: read once more
+        self._locks: dict[str, asyncio.Lock] = {}
         self._pr_tasks: dict[str, asyncio.Task] = {}
+        self._pr_waiters: dict[str, set[str]] = {}  # folder -> sessions waiting on its pull request lookup
         self._timer: asyncio.Task | None = None
+        self._rotate = 0
+        self._prepared = False
 
     # ── reading ───────────────────────────────────────────────────────────────────────────────────────────
 
@@ -103,20 +108,23 @@ class GitWatch:
     async def _pr_for(self, session_id: str, folder: str, state: dict[str, Any], *,
                       wait: float) -> dict[str, object] | None:
         """The pull request for the state's branch, if its upstream says there could be one. A lookup that has to be
-        started is waited for only ``wait`` seconds; it goes on in the background and the watcher is told when it
-        lands (a pull request that appears is a change)."""
+        started is waited for only ``wait`` seconds; it goes on in the background and every session waiting on it is
+        told when it lands (a pull request that appears is a change)."""
         if not state.get("branch") or not state.get("upstream"):
             return None
+        self._pr_waiters.setdefault(folder, set()).add(session_id)
         task = self._pr_tasks.get(folder)
         if task is None:
             task = asyncio.ensure_future(git_pr.read_pr(folder, self._top_allowed()))
             self._pr_tasks[folder] = task
 
-            def landed(t: asyncio.Task, f: str = folder, sid: str = session_id) -> None:
+            def landed(t: asyncio.Task, f: str = folder) -> None:
                 self._pr_tasks.pop(f, None)
+                waiting = self._pr_waiters.pop(f, set())
                 # A pull request that turns up after the route stopped waiting is a change a client must hear of.
                 if not t.cancelled() and t.exception() is None and t.result().kind == "pr":
-                    self.touch(sid)
+                    for sid in waiting:
+                        self.touch(sid)
 
             task.add_done_callback(landed)
         try:
@@ -138,13 +146,9 @@ class GitWatch:
 
     # ── telling ───────────────────────────────────────────────────────────────────────────────────────────
 
-    def note_seen(self, session_id: str, body: dict[str, Any]) -> None:
-        """A client was given *body* (by the route): that is what it knows."""
-        self._seen[session_id] = etag_of(body)
+    def note_active(self, session_id: str) -> None:
+        """A client fetched this session's git state: it counts as active for the timer."""
         self._active[session_id] = time.monotonic()
-        if len(self._seen) > 500:
-            for k in list(self._seen)[:250]:
-                self._seen.pop(k, None)
 
     def observe(self, event: dict[str, Any]) -> None:
         """A frame the bridge broadcast (called for every one; never raises): a turn ended, or a tool call did."""
@@ -160,12 +164,14 @@ class GitWatch:
 
     def touch(self, session_id: str) -> None:
         """Something may have changed in this session's folder (or its binding did): re-read soon, and say so if it
-        differs. Does nothing when no owner device is watching the session, or a re-read is already waiting."""
+        differs. Does nothing when no owner device is watching the session. A touch while a re-read is running is
+        not lost: the running one reads once more when it finishes."""
         bridge = self.bridge
-        if bridge is None or not bridge.operator_sockets_watching(session_id):
+        if bridge is None or not git_read.capability_ready() or not bridge.operator_sockets_watching(session_id):
             return
         task = self._pending.get(session_id)
         if task is not None and not task.done():
+            self._dirty.add(session_id)
             return
         try:
             loop = asyncio.get_running_loop()
@@ -182,53 +188,96 @@ class GitWatch:
 
     async def _reread(self, session_id: str) -> None:
         try:
-            await asyncio.sleep(SETTLE_S)
-            wait = self._frame_at.get(session_id, 0.0) + COALESCE_S - time.monotonic()
-            if wait > 0:                          # coalesced: at most one frame per session per COALESCE_S
-                await asyncio.sleep(wait)
-            await self.check(session_id)
+            while True:
+                self._dirty.discard(session_id)
+                await asyncio.sleep(SETTLE_S)
+                await self.check(session_id)
+                if session_id not in self._dirty:
+                    return
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.warning("git watch re-read failed for a session", exc_info=True)
 
-    async def check(self, session_id: str) -> bool:
-        """Read the folder afresh; send the frame if it differs from what a client was last given."""
-        body = await self.snapshot(session_id, fresh=True, pr_wait=PR_WAIT_S)
-        tag = etag_of(body)
-        if self._seen.get(session_id) == tag:
-            return False
-        bridge = self.bridge
-        if bridge is None:
-            return False
-        sent = await bridge.send_to_operators_watching(
-            {"type": "workspace_git_changed", "timestamp": time.time(),
-             "payload": {"session_id": session_id, "read_at": body.get("read_at")}},
-            session_id,
-        )
-        if sent:
-            self._seen[session_id] = tag
+    async def check(self, session_id: str, *, coalesce: bool = True) -> bool:
+        """Read the folder afresh; send the frame if it differs from the reading the last frame announced.
+
+        One at a time per session. At most one frame per session per ``COALESCE_S``: a read that finds a change
+        inside the window waits out the rest of it first (``coalesce``), so what is sent is the latest reading.
+        """
+        lock = self._locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            if coalesce:
+                wait = self._frame_at.get(session_id, 0.0) + COALESCE_S - time.monotonic()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+            body = await self.snapshot(session_id, fresh=True, pr_wait=PR_WAIT_S)
+            tag = etag_of(body)
+            known = self._sent.get(session_id)
+            if known == tag or (known is None and body.get("kind") == "none"):
+                return False                       # nothing a client could be missing
+            bridge = self.bridge
+            if bridge is None:
+                return False
+            # Recorded before the send and undone if nobody took it, so two checks cannot both announce one change.
+            previous = self._sent.get(session_id)
+            self._sent.pop(session_id, None)
+            self._sent[session_id] = tag               # most recently used last
+            try:
+                sent = await bridge.send_to_operators_watching(
+                    {"type": "workspace_git_changed", "timestamp": time.time(),
+                     "payload": {"session_id": session_id, "read_at": body.get("read_at")}},
+                    session_id,
+                )
+            except BaseException:
+                self._restore(session_id, previous)
+                raise
+            if not sent:
+                self._restore(session_id, previous)
+                return False
             self._frame_at[session_id] = time.monotonic()
-        return bool(sent)
+            if len(self._sent) > 500:
+                for k in list(self._sent)[:250]:
+                    self._sent.pop(k, None)
+                    self._frame_at.pop(k, None)
+                    self._locks.pop(k, None)
+            return True
+
+    def _restore(self, session_id: str, previous: str | None) -> None:
+        if previous is None:
+            self._sent.pop(session_id, None)
+        else:
+            self._sent[session_id] = previous
 
     # ── the slow timer ────────────────────────────────────────────────────────────────────────────────────
 
-    async def _tick(self) -> None:
+    def _candidates(self) -> list[str]:
+        """Sessions the timer reads: those an owner socket names in its subscribe filter, and those active lately
+        (a socket with no filter watches everything, so recent activity is what bounds it). Rotated, so more than
+        ``TIMER_MAX`` of them are all read in turn."""
         bridge = self.bridge
-        if bridge is None:
-            return
         now = time.monotonic()
         for sid in [s for s, at in self._active.items() if now - at > ACTIVE_S]:
             self._active.pop(sid, None)
-        count = 0
-        for sid in list(self._active):
-            if count >= TIMER_MAX:
-                break
+        named = bridge.operator_watched_sessions() if bridge is not None else set()
+        every = sorted(named | set(self._active))
+        if len(every) <= TIMER_MAX:
+            return every
+        start = self._rotate % len(every)
+        self._rotate += TIMER_MAX
+        return (every + every)[start:start + TIMER_MAX]
+
+    async def _tick(self) -> None:
+        bridge = self.bridge
+        if bridge is None or not git_read.capability_ready():
+            return
+        for sid in self._candidates():
             if self.folder_of(sid) is None or not bridge.operator_sockets_watching(sid):
                 continue
-            count += 1
+            if time.monotonic() - self._frame_at.get(sid, 0.0) < COALESCE_S:
+                continue                           # said a moment ago: the next tick reads it
             with contextlib.suppress(Exception):
-                await self.check(sid)
+                await self.check(sid, coalesce=False)
 
     async def _run_timer(self) -> None:
         while True:
@@ -240,8 +289,10 @@ class GitWatch:
             except Exception:
                 logger.warning("git watch timer failed", exc_info=True)
 
-    async def start(self) -> None:
-        """The startup self-test (is git held by the process limit here?), then the timer."""
+    async def prepare(self) -> bool:
+        """The self-test (is git held by the process limit here?), before any client can be told what this daemon can
+        do. Whether ``git/1`` is on."""
+        self._prepared = True
         try:
             ready = await git_read.prepare()
         except Exception:
@@ -251,7 +302,14 @@ class GitWatch:
             logger.info("git status: read-only reads of work folders are ON (git/1): git cannot start a program here")
         else:
             logger.warning("git status: OFF (git/1 is not advertised): the process limit does not hold for this user "
-                           "(root, or a host that does not count processes per user) or git was not found")
+                           "(root, or a host that does not count processes per user), git was not found or it is "
+                           "older than 2.31")
+        return ready
+
+    async def start(self) -> None:
+        """Startup: the self-test if the launcher did not already run it, then the timer."""
+        if not self._prepared:
+            await self.prepare()
         if self._timer is None:
             self._timer = asyncio.get_running_loop().create_task(self._run_timer())
 
@@ -273,7 +331,7 @@ def register_git_routes(app: Any, *, config: dict, conversation_store: Callable[
         not in a repository, or no git) or ``unreadable`` with ``why``. Owner devices and the main key only."""
         body = await watch.snapshot(session_id)
         tag = etag_of(body)
-        watch.note_seen(session_id, body)
+        watch.note_active(session_id)
         headers = {"ETag": tag, "Cache-Control": "no-store"}
         if not_modified(request.headers.get("if-none-match"), tag):
             return Response(status_code=304, headers=headers)

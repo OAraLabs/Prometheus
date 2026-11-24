@@ -450,6 +450,14 @@ class WebSocketBridge:
                 out.append(ws)
         return out
 
+    def operator_watched_sessions(self) -> set[str]:
+        """Sessions an operator socket names in its subscribe filter (a socket with no filter watches everything and
+        names none)."""
+        names: set[str] = set()
+        for ws in self.operator_sockets():
+            names |= set(self._ws_filters.get(ws) or ())
+        return names
+
     async def send_to_operators_watching(self, event: dict[str, Any], session_id: str) -> int:
         """Send *event* to the operator sockets watching *session_id* and no one else. Not the SignalBus: nothing
         about it is durable or replayed. Returns how many took it; a send that fails drops that socket."""

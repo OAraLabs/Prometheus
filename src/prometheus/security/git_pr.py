@@ -281,19 +281,20 @@ async def read_pr(folder: str, top_allowed: Callable[[str], bool]) -> PrRead:
     """The pull request for the branch a folder's repository has checked out. Never raises."""
     global _turn
     try:
-        opened = await gr.open_repo(folder, top_allowed)
-        if isinstance(opened, gr.GitRead):
-            return NONE
-        head = await gr.run([opened.git, *HEAD_ARGS], folder, opened.env)
-        if head.code != 0:
-            return NONE
-        branches = await gr.run([opened.git, *BRANCHES_ARGS], folder, opened.env)
-        up = upstream_of(head.out.decode("utf-8", "replace"),
-                         branches.out.decode("utf-8", "replace")) if branches.code == 0 else None
-        if up is None:
-            return NONE
-        remotes = await gr.run([opened.git, *REMOTES_ARGS], folder, opened.env)
-        url = remote_url(remotes.out.decode("utf-8", "replace"), up[0]) if remotes.code == 0 else None
+        async with gr.parallel():                  # the same limit as the status reads
+            opened = await gr.open_repo(folder, top_allowed)
+            if isinstance(opened, gr.GitRead):
+                return NONE
+            head = await gr.run([opened.git, *opened.scope, *HEAD_ARGS], folder, opened.env)
+            if head.code != 0:
+                return NONE
+            branches = await gr.run([opened.git, *opened.scope, *BRANCHES_ARGS], folder, opened.env)
+            up = upstream_of(head.out.decode("utf-8", "replace"),
+                             branches.out.decode("utf-8", "replace")) if branches.code == 0 else None
+            if up is None:
+                return NONE
+            remotes = await gr.run([opened.git, *opened.scope, *REMOTES_ARGS], folder, opened.env)
+            url = remote_url(remotes.out.decode("utf-8", "replace"), up[0]) if remotes.code == 0 else None
         repo = github_repo(url)
         args = gh_args(repo, up[1])
         if repo is None or args is None:

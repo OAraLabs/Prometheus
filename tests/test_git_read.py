@@ -714,3 +714,101 @@ class TestTheLimitsAndTheFloor:
         p = gr.git_program()
         assert p is None or os.path.isabs(p)
         assert not p or Path(p).name == "git"
+
+
+class TestWhatTheReviewFound:
+    async def test_status_walks_only_the_top_that_was_vetted_even_if_the_settings_change_after_the_check(self, world, monkeypatch):
+        mine = make(world, "mine")
+        other = make(world, "other")
+        for i in range(7):
+            (other / f"other-{i}.txt").write_text("x\n")
+        real = gr._store_facts
+
+        def swap(git_dir, common):
+            out = real(git_dir, common)
+            g(mine, "config", "core.worktree", str(other))      # the agent changes its settings after the vetting
+            return out
+
+        monkeypatch.setattr(gr, "_store_facts", swap)
+        r = await read(mine)
+        assert r.kind == "state" and r.top == str(mine.resolve()) and r.state["untracked"] == 0
+        # The control: without the binding, plain status there now walks the other folder.
+        assert "other-0.txt" in g(mine, "status", "--porcelain=v2")
+
+    async def test_a_git_folder_with_more_names_than_a_real_one_is_refused_not_listed_without_bound(self, world, monkeypatch):
+        d = make(world, "crowded")
+        monkeypatch.setattr(gr, "GIT_DIR_ENTRIES", 20)
+        for i in range(40):
+            (d / ".git" / f"junk-{i}").write_text("x\n")
+        r = await read(d)
+        assert r.kind == "unreadable" and r.why == gr.TOO_SLOW
+
+    async def test_objects_that_is_a_link_is_refused_before_anything_under_it_is_listed(self, world):
+        d = make(world, "linked-objects")
+        elsewhere = world / "elsewhere"
+        (elsewhere / "info").mkdir(parents=True)
+        shutil.rmtree(d / ".git" / "objects")
+        (d / ".git" / "objects").symlink_to(elsewhere)
+        info, top, deep = gr._store_facts(str(d / ".git"), str(d / ".git"))
+        assert info == [] and str(d / ".git" / "objects") in deep
+        assert (await read(d)).kind == "unreadable"
+
+    async def test_a_store_walk_that_does_not_finish_in_time_is_too_slow(self, world, monkeypatch):
+        d = make(world, "stuck")
+        import threading
+
+        gate = threading.Event()
+        monkeypatch.setattr(gr, "_store_facts", lambda *a: gate.wait(10) or ([], [], []))
+        monkeypatch.setattr(gr, "STORE_FACTS_S", 0.3)
+        try:
+            r = await read(d)
+        finally:
+            gate.set()
+        assert r.kind == "unreadable" and r.why == gr.TOO_SLOW
+
+    async def test_too_many_reads_queued_are_answered_at_once(self, world, monkeypatch):
+        import asyncio
+
+        monkeypatch.setattr(gr, "MAX_WAITING", 2)
+        monkeypatch.setattr(gr, "MAX_PARALLEL", 1)
+        monkeypatch.setattr(gr, "_sem", None)
+        folders = [make(world, f"q{i}") for i in range(6)]
+        gr.forget_reads()
+        results = await asyncio.gather(*(gr.read_git(str(f), ANY) for f in folders))
+        assert sum(1 for r in results if r.why == gr.TOO_SLOW) >= 1
+        assert all(r.kind in ("state", "unreadable") for r in results)
+
+    @pytest.mark.parametrize("branch,want", [("main", "main"), ("ma‮in", "main"), ("​x⁦y", "xy"),
+                                             ("feat/a b", "feat/a b"), ("\n", None)])
+    def test_a_branch_name_is_shown_without_invisible_or_reordering_characters(self, branch, want):
+        c = gr.parse_status(rec(HEAD[0], f"# branch.head {branch}"))
+        assert c.branch == want
+
+    @pytest.mark.parametrize("out,code,verdict", [
+        (b"started:1\n", 0, True),          # bash: the child could not start
+        (b"", 2, True),                     # dash: "Cannot fork"
+        (b"", 128, True),                   # bash 3.2 (macOS): the fork itself failed
+        (b"started:0\n", 0, False),         # the child started under the limit: not held
+        (b"", 137, None),                   # killed: proves nothing
+        (b"", 127, None),
+    ])
+    async def test_the_self_test_wants_a_positive_signal_that_the_child_was_refused(self, monkeypatch, out, code, verdict):
+        calls = {"n": 0}
+
+        async def fake(argv, cwd, env, **kw):
+            calls["n"] += 1
+            if kw.get("script") == 'exec "$@"':
+                return gr.Ran(code=0, out=b"started:0\n")
+            return gr.Ran(code=code, out=out)
+
+        monkeypatch.setattr(gr, "run", fake)
+        gr.forget_probe()
+        got = await gr.fork_limit_enforced()
+        assert got is bool(verdict)
+        if verdict is None:                 # not known: not kept, and not asked again at once
+            assert gr._enforced is None
+            n = calls["n"]
+            assert await gr.fork_limit_enforced() is False and calls["n"] == n
+        else:
+            assert gr._enforced is verdict
+        gr.forget_probe()

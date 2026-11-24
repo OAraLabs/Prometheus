@@ -406,5 +406,8 @@ async def launch_web(
         if notice.code != ALL_INTERFACES:
             logger.warning("network: %s", notice.message)
 
+    # The git self-test (is git held by the process limit here?) runs BEFORE any listener binds, so no client's
+    # `subscribed` ack can be built before `git/1` is decided (web/git_routes.py).
+    await app.state.git_watch.prepare()
     # Run every listener concurrently
     await asyncio.gather(*servers)
