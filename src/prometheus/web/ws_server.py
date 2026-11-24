@@ -1128,6 +1128,9 @@ class WebSocketBridge:
 
         if capability_ready():        # GET /api/sessions/{id}/git: only where the startup self-test proved the floor
             caps.append("git/1")
+        # Every serialized approval request says whether it must be answered in the app (permissions/critical.py),
+        # so a client can tell a missing ``critical`` (an older daemon) from ``false``.
+        caps.append("approval_critical")
         return [*caps, "projects"]  # chat projects (web/chat_projects_routes.py): always served
 
     async def _system_note(self, session_id: str, content: str) -> None:

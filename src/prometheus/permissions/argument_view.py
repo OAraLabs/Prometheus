@@ -106,6 +106,20 @@ MAX_NAME_CHARS = 40
 _REDACT_CAP = 8192
 
 
+def view_was_cut(view: dict[str, str] | None) -> bool:
+    """Does a rendered view (:func:`redact_arguments`'s answer) say that anything was masked, cut or left out?
+
+    It does when it opens with the :data:`NOTE_KEY` line (a value masked or cut, an argument named ``_x`` left out, a
+    worker's arguments not all sent) or ends with the :data:`OVERFLOW_KEY` line (more arguments than fit). Read from
+    the view itself, so it describes exactly what every surface shows, and cannot disagree with it. A real argument
+    named like either marker is renamed by the view, so the keys are the view's own. Never raises.
+    """
+    try:
+        return bool(view) and (NOTE_KEY in view or OVERFLOW_KEY in view)  # type: ignore[operator]
+    except Exception:                                      # noqa: BLE001 - fail toward critical
+        return True
+
+
 def _bounded(text: str) -> tuple[str, int]:
     """The text, or its first and last halves of :data:`_REDACT_CAP` with a marker (and how many characters that left out),
     so a regex never sees a huge value."""

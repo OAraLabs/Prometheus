@@ -23,7 +23,9 @@ from prometheus.permissions.argument_view import (
     MAX_ARGUMENTS,
     format_arguments,
     redact_arguments,
+    view_was_cut,
 )
+from prometheus.permissions.critical import is_critical
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +110,11 @@ class PendingAction:
     #: A request to LIFT A DEVICE'S HOLD (permissions/hold_lifts.py): which device. Approve-once, answered only
     #: by a person, never by "approve all"; the hold stands until then.
     hold_device_id: str | None = None
+    #: The arguments were cut or masked when captured (``argument_view.view_was_cut``): what a surface shows
+    #: is not the whole call, so it is answered in the app (``permissions/critical.py``).
+    arguments_cut: bool = False
+    #: What the owner's critical lists matched at capture, from the RAW arguments (``CriticalRules.matches``).
+    critical_matches: tuple[str, ...] = ()
     #: The chat the prompt went to (Telegram), so a withdrawal is told where the request was asked. None: no chat.
     notify_chat: Any = None
     _event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
@@ -482,6 +489,15 @@ class ApprovalQueue:
         while len(self._finished) > self.ORIGINS_REMEMBERED:
             self._finished.popitem(last=False)
 
+    def _critical_rules(self) -> Any:
+        """The owner's critical lists (``push.critical_*``); the launcher sets them, the defaults otherwise."""
+        rules = getattr(self, "critical_rules", None)
+        if rules is None:
+            from prometheus.permissions.critical import CriticalRules
+
+            rules = CriticalRules()
+        return rules
+
     def finished(self, request_id: str) -> tuple[str, str] | None:
         """``(resolution, detail)`` for a request this queue raised and that has ended (``approved``, ``denied``,
         ``expired`` or ``withdrawn`` with its reason), or None if it is still pending, never existed here, or is
@@ -541,6 +557,9 @@ class ApprovalQueue:
             "created_at": action.created_at,
             "expires_at": self.expires_at(action),
             "extents": prospective_extents(action),
+            # Answer in the app, never from a notification (permissions/critical.py). Computed HERE, once, so the
+            # REST list, the approval_pending frame and the push cannot disagree.
+            "critical": is_critical(action),
             # Already redacted and truncated (see PendingAction.arguments).
             # None means "this call had no arguments worth showing", which is
             # different from {} and Beacon may render the difference.
@@ -670,6 +689,7 @@ class ApprovalQueue:
             logger.warning("approval for %s refused: %d arguments cannot be shown", tool_name, len(arguments))
             return ApprovalResult.DENIED
         request_id = uuid4().hex[:8]
+        view = redact_arguments(arguments, wire=worker_task_id is not None)
         action = PendingAction(
             request_id=request_id,
             tool_name=tool_name,
@@ -682,7 +702,10 @@ class ApprovalQueue:
             # row) renders the same already-safe mapping and none of them can
             # forget to scrub. Storing the raw dict and scrubbing per surface
             # is how one surface ends up echoing a secret.
-            arguments=redact_arguments(arguments, wire=worker_task_id is not None),
+            arguments=view,
+            # What the view itself says it masked, cut or left out: the ⚠ line or the overflow row (argument_view).
+            arguments_cut=view_was_cut(view),
+            critical_matches=self._critical_rules().matches(tool_name, arguments, grant_file_path),
             session_id=session_id or RUN_SESSION.get(),
             once_only=once_only,
             worker_task_id=worker_task_id,
