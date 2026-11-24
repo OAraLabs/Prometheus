@@ -2377,6 +2377,12 @@ def create_app(
     # Setting it is therefore a security-relevant write, validated here.
     from prometheus.context.workspace import validate_workspace_path as _validate_workspace
 
+    def _git_touch(session_id: str) -> None:
+        """The binding changed: owner devices watching this session's git state are told if it differs now."""
+        watch = getattr(app.state, "git_watch", None)
+        if watch is not None:
+            watch.touch(session_id)
+
     @app.get("/api/sessions/{session_id}/workspace")
     async def get_session_workspace(session_id: str):
         """The effective working directory for this session and where it came
@@ -2417,6 +2423,7 @@ def create_app(
         if not raw:
             store.set_session_workspace(session_id, "", set_by="rest")
             logger.info("session workspace CLEARED for %s (rest)", session_id)
+            _git_touch(session_id)
             return {"ok": True, "session_id": session_id, "workspace": None}
         resolved, why = _validate_workspace(raw, config.get("security", {}) or {})
         if resolved is None:
@@ -2426,6 +2433,7 @@ def create_app(
         # where an operator reading the journal will see it.
         logger.warning("session workspace SET for %s → %s (rest) — this is now that "
                        "conversation's write boundary", session_id, resolved)
+        _git_touch(session_id)
         return {"ok": True, "session_id": session_id, "workspace": str(resolved)}
 
     @app.delete("/api/sessions/{session_id}/workspace")
@@ -2436,6 +2444,7 @@ def create_app(
             return JSONResponse({"error": "no durable store — session workspaces unavailable"}, status_code=503)
         store.set_session_workspace(session_id, "", set_by="rest")
         logger.info("session workspace CLEARED for %s (rest)", session_id)
+        _git_touch(session_id)
         return {"ok": True, "session_id": session_id, "workspace": None}
 
     # ── File checkpoints (item 4, 2026-09-01) ─────────────────────────
@@ -7223,6 +7232,12 @@ def create_app(
     from prometheus.web.speech_routes import register_speech_routes
 
     register_speech_routes(app, config=config, devices=_devices, auth_on=lambda: bool(_api_token))
+
+    # ── Git status of a conversation's work folder (capability git/1; contract: Beacon's git-status.md) ────
+    # Read-only, owner only (web/route_access.py); the launcher lets the watcher hear the bridge's frames.
+    from prometheus.web.git_routes import register_git_routes
+
+    register_git_routes(app, config=config, conversation_store=_conversation_store)
 
     # ── Static files (must be last — catch-all) ─────────────────────
 

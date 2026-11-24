@@ -274,6 +274,7 @@ OPERATOR_ONLY: frozenset[tuple[str, str]] = frozenset({
     # /api/sessions
     ("GET", "/api/sessions/{session_id}/checkpoints"),
     ("GET", "/api/sessions/{session_id}/checkpoints/{checkpoint_id}"),
+    ("GET", "/api/sessions/{session_id}/git"),
     ("POST", "/api/sessions/{session_id}/checkpoints/{checkpoint_id}/restore"),
     ("DELETE", "/api/sessions/{session_id}/model"),
     ("GET", "/api/sessions/{session_id}/model"),
