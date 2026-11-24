@@ -590,7 +590,20 @@ async def read_git(folder: str, top_allowed: Callable[[str], bool]) -> GitRead:
     return await asyncio.shield(task)
 
 
-async def _read(folder: str, top_allowed: Callable[[str], bool]) -> GitRead:
+@dataclass
+class Opened:
+    """A repository that is plainly there, safe to run git in: the program, its environment, where it is."""
+
+    git: str
+    env: dict[str, str]
+    top: str
+    git_dir: str
+
+
+async def open_repo(folder: str, top_allowed: Callable[[str], bool]) -> Opened | GitRead:
+    """Every check that comes BEFORE git reads anything of the folder: the limit holds here, git is found, the
+    repository is plainly there, its top is one the daemon accepts, a linked worktree names the folder back, and the
+    repository does not borrow another's history. A GitRead (none or unreadable) when any fails."""
     if not await fork_limit_enforced():
         return _unreadable(UNSAFE_HERE)
     git = git_program()
@@ -622,7 +635,14 @@ async def _read(folder: str, top_allowed: Callable[[str], bool]) -> GitRead:
         return _unreadable(TOO_SLOW)
     if not store_is_own(git_dir, common, info, top_links, deep_links):
         return _unreadable(NOT_READ)
-    st = await run([git, *STATUS_ARGS], folder, env)
+    return Opened(git=git, env=env, top=top, git_dir=git_dir)
+
+
+async def _read(folder: str, top_allowed: Callable[[str], bool]) -> GitRead:
+    opened = await open_repo(folder, top_allowed)
+    if isinstance(opened, GitRead):
+        return opened
+    st = await run([opened.git, *STATUS_ARGS], folder, opened.env)
     if st.timed_out:
         return _unreadable(TOO_SLOW)
     if st.too_big:
@@ -634,14 +654,14 @@ async def _read(folder: str, top_allowed: Callable[[str], bool]) -> GitRead:
         return _unreadable(NOT_READ)
     names: list[str] = []
     with contextlib.suppress(OSError):
-        names = os.listdir(git_dir)
+        names = os.listdir(opened.git_dir)
     state: dict[str, object] = {
         "branch": parsed.branch, "commit": parsed.commit, "upstream": parsed.upstream,
         "ahead": parsed.ahead if parsed.upstream else None, "behind": parsed.behind if parsed.upstream else None,
         "staged": parsed.staged, "unstaged": parsed.unstaged, "untracked": parsed.untracked,
         "conflicted": parsed.conflicted, "changed": parsed.changed, "operation": operation_of(names),
     }
-    return GitRead("state", top=top, state=state, truncated=parsed.truncated, git_dir=git_dir)
+    return GitRead("state", top=opened.top, state=state, truncated=parsed.truncated, git_dir=opened.git_dir)
 
 
 def payload(read: GitRead, *, pr: dict[str, object] | None = None, read_at: float | None = None) -> dict[str, object]:
