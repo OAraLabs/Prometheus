@@ -4,6 +4,8 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## Unreleased
 
+- Pause everything, the rest (Beacon iOS): a NEW pause pushes one "Prometheus paused" alert, saying who paused (never why, and never a chat account's id) with no category, to each owner device with no live connection (a second pause pushes nothing, and a failed or slow push never fails the pause). `oara doctor` has a Pause row, in the checks that always run: ok, a warning with since when, or an error with what to do when the pause file is unreadable (which counts as paused). The curator archives nothing while paused (`/curator run` refuses, and a pause that lands during its review archives nothing).
+
 ## 0.9.22 (2026-11-24)
 
 ### Security advisories

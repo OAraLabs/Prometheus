@@ -1227,6 +1227,11 @@ async def cmd_curator_run(*, dry_run: bool = False) -> str:
     instance = get_curator()
     if instance is None:
         return "Curator not wired (check learning.curator_enabled in config)."
+    from prometheus.engine import pause as _pause
+
+    if _pause.current() is not None:
+        # Its non-model pass archives skill files: nothing runs while everything is paused.
+        return "Prometheus is paused. The curator runs again once it is resumed."
     try:
         run = await instance.run_once(dry_run=dry_run)
     except Exception as exc:
