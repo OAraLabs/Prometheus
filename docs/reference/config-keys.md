@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **466** of
+Every key in `config/prometheus.yaml.default` — **467** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -83,7 +83,7 @@ none either — the key is documented so its absence is visible.
 | `security.workspace_root` | `~/.prometheus/workspace` |
 | `security.dashboard_tool_bind_host` | `127.0.0.1` |
 | `security.denied_commands` | `['DROP TABLE']` |
-| `security.denied_paths` | `['/etc', '/sys', '/boot', '/*/.ssh', '/*/.gnupg', '/*/.config/*/*env', '/*/Library/Application Support/Prometheus/pairing', '/*/.local/share/prometheus/pairing', '/*/.prometheus/data/devices.db*', '/*/.prometheus/data/cron_jobs.json*', '/*/.prometheus/data/cron_history.jsonl*', '/*/.prometheus/data/cron_undelivered.jsonl*', '/*/.prometheus/data/cron_scheduler.pid*', '/*/.prometheus/node', '/*/.prometheus/data/mcp_servers.json*', '/*/.prometheus/xai_oauth.json*', '/*/.prometheus/data/pause.json*']` |
+| `security.denied_paths` | `['/etc', '/sys', '/boot', '/*/.ssh', '/*/.gnupg', '/*/.config/*/*env', '/*/Library/Application Support/Prometheus/pairing', '/*/.local/share/prometheus/pairing', '/*/.prometheus/data/devices.db*', '/*/.prometheus/data/cron_jobs.json*', '/*/.prometheus/data/cron_history.jsonl*', '/*/.prometheus/data/cron_undelivered.jsonl*', '/*/.prometheus/data/cron_scheduler.pid*', '/*/.prometheus/node', '/*/.prometheus/data/mcp_servers.json*', '/*/.prometheus/xai_oauth.json*', '/*/.prometheus/data/pause.json*', '/*/.config/prometheus']` |
 | `security.bash_confinement` | `auto` |
 | `security.bash_allow_ssh` | `False` |
 | `security.bash_write_confinement` | `auto` |
@@ -203,7 +203,7 @@ none either — the key is documented so its absence is visible.
 | `slash_commands.gemini` | *(section)* |
 | `slash_commands.gemini.provider` | `gemini` |
 | `slash_commands.gemini.api_key_env` | `GEMINI_API_KEY` |
-| `slash_commands.gemini.model` | `gemini-2.5-flash` |
+| `slash_commands.gemini.model` | `gemini-3.5-flash-lite` |
 | `slash_commands.xai` | *(section)* |
 | `slash_commands.xai.provider` | `xai` |
 | `slash_commands.xai.api_key_env` | `XAI_API_KEY` |
@@ -346,6 +346,7 @@ none either — the key is documented so its absence is visible.
 | `web.tls_ws_port` | `8011` |
 | `web.bind` | *(empty — no code default)* |
 | `web.trusted_proxies` | `[]` |
+| `web.identity_hosts` | `[]` |
 | `web.api_token` | *(empty — no code default)* |
 | `web.dashboard_port` | `3002` |
 | `pairing` | *(section)* |

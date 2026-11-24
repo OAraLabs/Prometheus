@@ -176,12 +176,6 @@
   "home/.prometheus/.daemon_started": {
    "replaced": "<boot-specific>"
   },
-  "home/.prometheus/MEMORY.md": {
-   "text": ""
-  },
-  "home/.prometheus/USER.md": {
-   "text": ""
-  },
   "home/.prometheus/checkpoints/blobs/56/5625f8d31de1f74f82e55989d0abe136a0647317387626c056d006e31d220cba": {
    "text": "Stock counts for this depot are kept in bin-7.txt.\n"
   },

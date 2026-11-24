@@ -18,6 +18,7 @@ import contextvars
 import hashlib
 import logging
 import time
+import weakref
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable, ClassVar
@@ -69,6 +70,19 @@ if TYPE_CHECKING:
     # Lazy-imported at runtime to avoid circular import
     # (coordinator.__init__ → subagent → engine.agent_loop)
     pass
+
+#: The task AgentLoop.run_async runs its turn in (engine/pause.py run_as_turn). That task, not a flag: every task
+#: the turn spawns copies this value, and a turn run from one of those (a worker's re-engage) must get a turn task
+#: of its own, or a pause cannot cancel it. A weak reference, so a long-lived spawned task does not keep a finished
+#: turn (and its result) alive.
+_IN_TURN_TASK: contextvars.ContextVar[weakref.ref[asyncio.Task[object]] | None] = contextvars.ContextVar(
+    "prometheus_in_turn_task", default=None)
+
+
+def _in_own_turn_task() -> bool:
+    ref = _IN_TURN_TASK.get()
+    task = asyncio.current_task()
+    return ref is not None and task is not None and ref() is task
 
 log = logging.getLogger(__name__)
 
@@ -749,6 +763,9 @@ class LoopContext:
     # profile so /profile and Beacon switches reach the NEXT run through this
     # long-lived context — per-session values must be per-call parameters.
     profile_resolver: object | None = None
+    # What the connecting client itself sent as instructions on the OpenAI-compatible route (web/openai_api.py),
+    # kept apart from system_prompt so a run held to a profile, which is not sent the owner's prompt, still gets it.
+    client_instructions: str = ""
     # Item W (2026-09-01): per-session working directory. A RESOLVER, like
     # profile_resolver — this context is shared by every session, so the
     # workspace is looked up per run, never stored here. Returns a Path (or
@@ -1742,6 +1759,8 @@ async def _on_stream_error(
     try:
         async for event in stream:
             yield event
+    except _pause.Paused:
+        raise  # a pause is not the provider's failure
     except Exception:
         try:
             on_error()
@@ -2029,6 +2048,17 @@ async def _run_loop(
 
     # Sprint 3: format tools + system prompt for the target model
     active_system_prompt = context.system_prompt
+    if _hold is not None:
+        # A run the operator HOLDS to a profile is not the owner's: it gets the profile's own bootstrap files (and the
+        # connecting client's instructions, on the OpenAI-compatible route), never the owner's prompt. That prompt is built once
+        # at boot for the owner: persona, instructions, the machine and network summary, memory, project files.
+        from prometheus.context.prompt_assembler import held_system_prompt
+        from prometheus.context.system_prompt import CLIENT_SYSTEM_HEADER
+
+        active_system_prompt = held_system_prompt(
+            _hold,  # type: ignore[arg-type]
+            f"{CLIENT_SYSTEM_HEADER}\n{context.client_instructions.strip()}" if context.client_instructions.strip() else "",
+        )
 
     # Item W: resolve this session's workspace once per run (frozen for the
     # run like the tool catalog; a /workspace change lands on the NEXT run).
@@ -2044,7 +2074,7 @@ async def _run_loop(
     run_cwd: Path = session_workspace or context.cwd
     run_workspace_roots: tuple[Path, ...] | None = (session_workspace,) if session_workspace else None
     _RUN_PATHS.set((run_cwd, run_workspace_roots))
-    if session_workspace is not None and context.project_prompt_builder is not None:
+    if session_workspace is not None and context.project_prompt_builder is not None and _hold is None:
         # Swap the boot-time project section for the workspace's own. Exact
         # substring: both texts come from the same builder, so no parsing.
         try:
@@ -2067,7 +2097,7 @@ async def _run_loop(
             "loaded" if session_section else "none found",
             len(session_section or ""), "replacing" if swapped else "appended after",
         )
-    if context.memory_prompt_builder is not None:
+    if context.memory_prompt_builder is not None and _hold is None:
         active_system_prompt = _refresh_memory_section(
             active_system_prompt, context.boot_memory_prompt, context.memory_prompt_builder,
         )
@@ -2116,7 +2146,7 @@ async def _run_loop(
     # nudge — recalled facts committed to durable history would be
     # re-extracted on the next memory cycle (a feedback loop). Fail-open:
     # a recall error must never block the turn.
-    if context.memory_recall is not None:
+    if context.memory_recall is not None and _hold is None:
         _latest_user_text = next(
             (m.text for m in reversed(messages) if m.role == "user" and m.text),
             None,
@@ -5493,6 +5523,42 @@ async def _execute_tool_call(
     # written on a row whose call the adapter changed (non-empty repair_log).
     _raw_call = {"name": _original_tool_name, "input": _original_tool_input}
     _adapter_tier = getattr(context.adapter, "tier", None) if context.adapter else None
+    # A run limited to a profile hears the same refusal for a tool its profile leaves out whether or not that tool
+    # exists, BEFORE the adapter looks the name up: the adapter's unknown-tool message lists every registered tool
+    # and its near-miss repair would name a hidden one. Only the tools the profile permits are ever named.
+    from prometheus.config.profiles import current_run_profile as _current_run_profile
+    from prometheus.config.profiles import profile_permits as _profile_permits
+
+    _early_profile = _current_run_profile()
+    # A held run also hears it for a name that is not registered at all: a profile written as ``exclude_tools`` only
+    # permits any name it does not exclude, a made-up one included.
+    if _early_profile is not None and (
+        not _profile_permits(_early_profile, tool_name)
+        or (getattr(_early_profile, "held", False) and context.tool_registry.get(tool_name) is None)
+    ):
+        _usable = sorted(t.name for t in context.tool_registry.list_tools() if _profile_permits(_early_profile, t.name))
+        log.info("Refused %s: not in profile %r", tool_name, _early_profile.name)
+        if context.telemetry is not None:
+            context.telemetry.record(
+                model=_serving_model(context),
+                tool_name=tool_name,
+                success=False,
+                error_type="permission_denied",
+                error_detail=f"not in profile {_early_profile.name!r}",
+                repairs=0,
+                served_model=served_model,
+                parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
+                session_id=_row_session,
+                **_v2_call(tool_name, tool_use_id, success=False, repair_log=repair_log, raw_call=_raw_call),
+            )
+        return ToolResultBlock(
+            tool_use_id=tool_use_id,
+            content=(f"{tool_name} is not available in this conversation: its profile {_early_profile.name!r} "
+                     f"does not include it. Use one of the tools you were given"
+                     + (f" ({', '.join(_usable)})" if _usable else "")
+                     + ", or ask the owner to switch profiles (/profile)."),
+            is_error=True,
+        )
     if context.adapter is not None and _adapter_tier != "off":
         try:
             tool_name, tool_input, repair_log = context.adapter.validate_and_repair(
@@ -5852,6 +5918,10 @@ async def _execute_tool_call(
     # The path the gate rules on, resolved: the file tool opens exactly this one, through no link
     # (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q). None when there is no gate or no path.
     _decided_path: str | None = None
+    # The owner approved this call because the tool asked for it (BaseTool.requires_owner_approval): set below only
+    # after a yes from the approval channel, and read by the tool through tool_context.OWNER_APPROVED.
+    _owner_approved = False
+    _owner_reason: str | None = None
     # Permission check (Sprint 4 + TRUST-CONTEXT)
     if context.permission_checker is not None:
         # THE DEFECT THIS REPLACES: `tool_input.get("file_path")` — a key NO
@@ -6019,6 +6089,12 @@ async def _execute_tool_call(
                 f"{_turn_author or 'a member of this chat'} asked for this, not the owner: "
                 f"{tool_name} runs only if the owner approves"
             )
+        _owner_reason = tool.requires_owner_approval(parsed_input) if hasattr(tool, "requires_owner_approval") else None
+        if _owner_reason and decision.action != "DENY":
+            # The owner's own approval, whatever the mode or a remembered grant allowed: each call on its own, with
+            # its arguments shown (GHSA-f68r-xfv4-83fr: the memory tool's changes to MEMORY.md and USER.md).
+            from prometheus.permissions.checker import PermissionDecision
+            decision = PermissionDecision.approve(_owner_reason)
         if not decision.allowed:
             # The gate's own queue is the fallback prompt. Resolved HERE, in
             # the one function every surface goes through, rather than wired
@@ -6053,6 +6129,7 @@ async def _execute_tool_call(
                         )
                         _LEGACY_PERMISSION_PROMPT_WARNED = True
                     confirmed = await _prompt(tool_name, decision.reason)
+                _owner_approved = bool(confirmed) and bool(_owner_reason)
                 if not confirmed:
                     if context.telemetry is not None:
                         context.telemetry.record(
@@ -6118,8 +6195,14 @@ async def _execute_tool_call(
     # Marks the span as a tool call for the one reader that must know: the
     # desktop door refuses to start from inside one (W3; engine/tool_context).
     # Set BEFORE wait_for so the task it creates inherits it.
-    from prometheus.engine.tool_context import TOOL_EXECUTION as _TOOL_EXECUTION
+    from prometheus.engine.tool_context import (
+        APPROVED_CARD as _APPROVED_CARD,
+        OWNER_APPROVED as _OWNER_APPROVED,
+        TOOL_EXECUTION as _TOOL_EXECUTION,
+    )
     _tool_ctx_token = _TOOL_EXECUTION.set(tool_name or "?")
+    _owner_approved_token = _OWNER_APPROVED.set(_owner_approved)
+    _approved_card_token = _APPROVED_CARD.set(_owner_reason if _owner_approved else None)
     try:
         result = await asyncio.wait_for(
             tool.execute(
@@ -6196,6 +6279,8 @@ async def _execute_tool_call(
         )
     finally:
         _TOOL_EXECUTION.reset(_tool_ctx_token)
+        _OWNER_APPROVED.reset(_owner_approved_token)
+        _APPROVED_CARD.reset(_approved_card_token)
     _latency_ms = (time.monotonic() - _t0) * 1000.0
 
     # WEAVE-PRESS: when a user-initiated bash command fails with
@@ -6568,6 +6653,22 @@ class AgentLoop:
         ``surface`` (telemetry v2) names the caller's front door for the
         turn's ``turns``/``responses`` rows; record-only, like the two above.
         """
+        # PAUSE EVERYTHING (engine/pause.py): the turn runs as a task of its own, so a pause cancels THIS turn and
+        # nothing else. Telegram, Slack, Discord and the benchmark commands call here, some inline in a long-lived
+        # poller task a pause must never cancel. Re-entered once inside the new task (marked as the turn's own task);
+        # called through the class, so the body below stays this method's own. A pause reaches the caller as Paused.
+        if not _in_own_turn_task():
+            async def _as_turn() -> RunResult:
+                own = asyncio.current_task()
+                if own is None:  # never: run_as_turn runs this coroutine as a task
+                    raise RuntimeError("a turn with no task of its own")
+                _IN_TURN_TASK.set(weakref.ref(own))
+                return await AgentLoop.run_async(
+                    self, system_prompt, user_message, messages=messages, session_id=session_id,
+                    session_state=session_state, tool_choice=tool_choice, record_session_id=record_session_id,
+                    record_summary=record_summary, surface=surface)
+
+            return await _pause.run_as_turn(_as_turn())
         if messages is not None:
             messages = list(messages)  # shallow copy — run_loop mutates in place
             if not user_message:

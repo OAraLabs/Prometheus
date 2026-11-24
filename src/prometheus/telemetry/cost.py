@@ -74,6 +74,9 @@ PRICING: dict[str, tuple[float, float]] = {
     # prompt length): these are the standard tier, text input.
     "gemini-2.5-flash": (0.30, 2.50),
     "gemini-2.5-pro": (1.25, 10.00),                # ≤200k prompt
+    # Their replacements — verified 2026-11-23 from aistudio.google.com/docs/pricing, standard tier.
+    "gemini-3.5-flash-lite": (0.30, 2.50),
+    "gemini-3.8-flash": (0.75, 3.75),               # through 2026-12-31; $1.50 / $7.50 from 2027-01-01
     # xAI (not re-verified — docs.x.ai no longer lists grok-3)
     "grok-3": (3.00, 15.00),
     "grok-3-mini": (0.30, 0.50),
@@ -121,6 +124,7 @@ PRICING: dict[str, tuple[float, float]] = {
     # still overrides it to `subscription` when the box is pointed at a plan.
     "qwen3.8-max": (2.00, 6.00),
     "qwen3.8-flash": (0.15, 0.48),
+    "qwen4-max": (1.50, 4.50),                      # help/en/model-studio/qwen4-max, international, read 2026-11-23
     "qwen3.7-max": (2.50, 7.50),                    # superseded by 3.8-max, which is cheaper
 }
 
@@ -153,8 +157,11 @@ BillingMode = str  # 'local' | 'subscription' | 'metered' | 'unknown'
 
 # Hosts that bill by subscription rather than per token. Matched against the provider's RESOLVED
 # base_url, so this reflects how the box is actually configured rather than a guess from a name.
-# (Alibaba's Token Plan and Coding Plan; both documented in providers/registry.py.)
-SUBSCRIPTION_HOST_MARKERS: tuple[str, ...] = ("token-plan.", "coding-intl.")
+# (Alibaba's Token Plan and Coding Plan, the GLM Coding Plan and Kimi Code: every subscription plan in
+# providers/plans.py, which tests/test_provider_plans.py holds this list to.)
+SUBSCRIPTION_HOST_MARKERS: tuple[str, ...] = (
+    "token-plan.", "coding-intl.", "api.z.ai/api/coding/", "api.kimi.ai/coding/",
+)
 
 # Hosts that resell other vendors' models per token under `vendor/model` ids. For a call served from one, a slash in
 # the name is the vendor prefix, NOT a path: without this the usual `anthropic/claude-...` id read as "served from a
@@ -289,6 +296,16 @@ def billing_stamp_full(
             return "local", None
         host = billing_host_of(provider)
         url = f"//{host}" if host else None
+        # Host and path, transient like the host: a plan that shares its host with pay as you go (the GLM Coding
+        # Plan on api.z.ai) is told apart only by its path. Never the query (Gemini's ``?key=``); only the matched
+        # marker is persisted.
+        raw = getattr(provider, "base_url", None) or getattr(provider, "_base_url", None)
+        if url and isinstance(raw, str):
+            from urllib.parse import urlsplit
+
+            path = urlsplit(raw.strip()).path
+            if path and any(m in f"{url}{path}/" for m in SUBSCRIPTION_HOST_MARKERS):
+                url = f"{url}{path}/"
         mode, _reason_withheld = billing_for(model or "", url)
         marker = matched_subscription_marker(url) if mode == "subscription" else None
         return mode, marker

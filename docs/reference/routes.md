@@ -9,7 +9,7 @@ app. For what each one is *for*, see the curated
 [API guide](../guide/api.md) — this file is the complete list, that
 one is the explanation.
 
-## Daemon app — 145 paths
+## Daemon app — 146 paths
 
 | Path | Methods |
 |---|---|
@@ -118,6 +118,7 @@ one is the explanation.
 | `/api/sessions/{session_id}/checkpoints/{checkpoint_id}/restore` | POST |
 | `/api/sessions/{session_id}/computer` | DELETE, GET, PUT |
 | `/api/sessions/{session_id}/fork` | GET, POST |
+| `/api/sessions/{session_id}/git` | GET |
 | `/api/sessions/{session_id}/messages` | GET |
 | `/api/sessions/{session_id}/model` | DELETE, GET, POST |
 | `/api/sessions/{session_id}/pin` | PUT |

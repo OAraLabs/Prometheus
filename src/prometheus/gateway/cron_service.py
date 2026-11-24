@@ -195,14 +195,15 @@ def set_job_enabled(name: str, enabled: bool) -> bool:
     return False
 
 
-def mark_job_run(name: str, *, success: bool) -> None:
-    """Update last_run and recompute next_run after a job executes."""
+def mark_job_run(name: str, *, success: bool, status: str | None = None) -> None:
+    """Update last_run and recompute next_run after a job executes. *status* overrides ``success``/``failed``
+    (``skipped``: a job due while everything was paused, engine/pause.py)."""
     jobs = load_cron_jobs()
     now = datetime.now(timezone.utc)
     for job in jobs:
         if job.get("name") == name:
             job["last_run"] = now.isoformat()
-            job["last_status"] = "success" if success else "failed"
+            job["last_status"] = status or ("success" if success else "failed")
             schedule = job.get("schedule", "")
             if validate_cron_expression(schedule):
                 job["next_run"] = next_run_time(schedule, now).isoformat()

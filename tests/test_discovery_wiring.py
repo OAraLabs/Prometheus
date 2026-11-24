@@ -54,7 +54,7 @@ async def test_the_default_backend_without_the_library_is_a_status_not_a_crash(n
     advertiser = Advertiser(
         state=NetworkState(mode=HOME, bind="0.0.0.0", bind_source="config", tls_enabled=False, warnings=[]),
         settings=NetworkSettings(home_network=True, allow_plaintext_lan=True), port=8005,
-        hello=lambda: {"v": "1", "name": "n", "agent": "a", "fp": "", "pair": "approve", "tls": False},
+        hello=lambda: {"v": "1", "name": "n", "agent": "a", "fp": "", "pair": "approve", "tls": False, "ic": 2},
         display_name=lambda: "n",
         adapters=lambda: [SimpleNamespace(name="en0", nice_name="en0",
                                           ips=[SimpleNamespace(ip="192.168.1.2", is_IPv4=True, is_IPv6=False)])])
@@ -175,7 +175,7 @@ async def test_starting_the_advertiser_never_holds_up_startup(no_zeroconf):
     advertiser = Advertiser(
         state=NetworkState(mode=HOME, bind="0.0.0.0", bind_source="config", tls_enabled=False, warnings=[]),
         settings=NetworkSettings(home_network=True, allow_plaintext_lan=True), port=8005,
-        hello=lambda: {"v": "1", "name": "n", "agent": "a", "fp": "", "pair": "approve", "tls": False},
+        hello=lambda: {"v": "1", "name": "n", "agent": "a", "fp": "", "pair": "approve", "tls": False, "ic": 2},
         display_name=lambda: "n", adapters=lambda: [])
     await asyncio.wait_for(advertiser.start(), timeout=5)
     await advertiser.stop()

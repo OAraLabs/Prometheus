@@ -1218,6 +1218,12 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     from prometheus.router.model_router import log_slash_command_wiring
     log_slash_command_wiring(config, logger)
 
+    # A route that runs with no person waiting on a plan sold for interactive use: warned, never refused.
+    from prometheus.providers.plans import unattended_warnings
+    for _plan_warnings in unattended_warnings(config).values():
+        for _line in _plan_warnings:
+            logger.warning("plans: %s", _line)
+
     divergence_detector = create_divergence_detector(config)
 
     # Sprint 15 wiring fix: HookExecutor was built but never created in daemon

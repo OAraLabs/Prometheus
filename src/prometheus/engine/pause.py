@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -106,7 +107,17 @@ def read_file(path: Path) -> PauseInfo | None:
     since, by, reason = data.get("since"), data.get("by"), data.get("reason", "")
     if not isinstance(since, (int, float)) or isinstance(since, bool) or not isinstance(by, str):
         return _unreadable("bad fields")
-    return PauseInfo(since=float(since), by=by, reason=reason if isinstance(reason, str) else "")
+    try:
+        when = float(since)
+    except (OverflowError, ValueError):                   # an integer too large for a float
+        return _unreadable("bad time")
+    if not math.isfinite(when) or not 0 <= when < SINCE_MAX:
+        return _unreadable("bad time")                    # Infinity, NaN, negative, or past what a clock shows
+    return PauseInfo(since=when, by=by, reason=reason if isinstance(reason, str) else "")
+
+
+#: Seconds since the epoch past which a ``since`` is nonsense (the year 5138): every clock function can show it.
+SINCE_MAX = 1e11
 
 
 def _write_file(path: Path, data: dict[str, Any]) -> None:
@@ -205,12 +216,40 @@ def installed() -> PauseState | None:
     return _installed
 
 
+#: The daemon names its pause file to every child it builds (tasks/child_env.py), so a child never guesses.
+CHILD_ENV = "PROMETHEUS_PAUSE_FILE"
+
+
+def child_env_entry() -> dict[str, str]:
+    """``{PROMETHEUS_PAUSE_FILE: <the pause file>}`` for a child's environment: the daemon's own file, or (in a
+    child) the file it was told, so a grandchild reads the same file as its parent."""
+    state = installed()
+    if state is not None:
+        return {CHILD_ENV: str(state.path)}
+    return {CHILD_ENV: os.environ.get(CHILD_ENV) or str(pause_path())}
+
+
 def current() -> PauseInfo | None:
-    """Is the agent paused? The installed state, or (a child process) the file, re-read when it changes."""
+    """Is the agent paused? The installed state, or (a child process) the file, re-read when it changes.
+
+    A child the daemon built is told the exact file (:data:`CHILD_ENV`). If it cannot reach that file's FOLDER
+    (missing or unreadable), it is paused: fail closed. A readable folder with no file means never paused. A folder
+    hidden behind an empty mount looks readable and empty, so it reads as not paused: this check cannot tell, which
+    is why the daemon's own state (and its cancelling the turns it runs) is the authority, not the file. A process
+    that was not told (a CLI run) reads the default place, where a missing folder is not a pause.
+    """
     global _file_cache
     if _installed is not None:
         return _installed.current
-    path = pause_path()
+    told = os.environ.get(CHILD_ENV)
+    path = Path(told) if told else pause_path()
+    if told:
+        try:
+            os.stat(path.parent)
+        except OSError as exc:
+            return _unreadable(f"pause folder unreachable ({type(exc).__name__})")
+        if not os.access(path.parent, os.R_OK | os.X_OK):
+            return _unreadable("pause folder unreadable")
     try:
         st = os.stat(path)
     except FileNotFoundError:

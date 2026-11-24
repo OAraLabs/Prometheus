@@ -2,8 +2,11 @@
 
 A phone on the home network has no token and no address, so this is the first thing it can ask, and so
 the most exposed route the daemon has. It therefore tells a stranger as little as it can and still be
-useful: EXACTLY six fields (``HELLO_FIELDS``), the same six the mDNS TXT record carries
-(``hello_txt``), so the two cannot drift and a seventh has to be argued for in review. Never in it:
+useful: EXACTLY seven fields (``HELLO_FIELDS``), the same seven the mDNS TXT record carries
+(``hello_txt``), so the two cannot drift and an eighth has to be argued for in review. The seventh, ``ic``, is one
+small integer: the highest identity-challenge version this daemon speaks (``web/identity_challenge.py``), so a phone
+can require v2 for an unpinned pairing before it sends anything. ``0`` in setup mode, which has no challenge route. A hint only: a relay can edit it, so the client
+enforces the version on the challenge ANSWER, never on this. Never in it:
 addresses, the OS, user names, the model, uptime, session or device counts, whether anyone is paired.
 
 Two applications serve it, the configured daemon (``web/server.py``) and setup mode
@@ -32,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 from prometheus.config.display_name import DEFAULT_NAME, clean_label, display_name
 from prometheus.config.instance_key import instance_fingerprint
 from prometheus.version import package_version
+from prometheus.web.identity_challenge import HIGHEST_VERSION
 from prometheus.web.source_limits import SourceLimiter
 
 if TYPE_CHECKING:
@@ -39,7 +43,7 @@ if TYPE_CHECKING:
     from fastapi.responses import JSONResponse
 
 #: The answer, and the TXT record, are exactly these keys.
-HELLO_FIELDS = ("v", "name", "agent", "fp", "pair", "tls")
+HELLO_FIELDS = ("v", "name", "agent", "fp", "pair", "tls", "ic")
 
 #: Requests per minute per TCP peer.
 HELLO_PER_MINUTE = 60
@@ -80,7 +84,7 @@ def build_hello(
     approval: bool = False,
     tls: bool = False,
 ) -> dict[str, Any]:
-    """The six fields. *config* is ``None`` in setup mode, where there is none yet.
+    """The seven fields. *config* is ``None`` in setup mode, where there is none yet.
 
     *approval* is whether this daemon serves ``POST /api/pair/requests``: the caller knows (the route is
     registered and ``pairing.requests_enabled`` is on), so hello says what is true rather than guessing.
@@ -92,11 +96,12 @@ def build_hello(
         "fp": instance_fingerprint(),
         "pair": pair_mode(setup_mode=setup_mode, auth_on=auth_on, approval=approval),
         "tls": bool(tls),
+        "ic": 0 if setup_mode else HIGHEST_VERSION,
     }
 
 
 def hello_txt(hello: Mapping[str, Any]) -> dict[str, str]:
-    """The mDNS TXT dictionary for a hello answer: the same six keys, every value a string.
+    """The mDNS TXT dictionary for a hello answer: the same seven keys, every value a string.
 
     Raises :class:`ValueError` for a key outside ``HELLO_FIELDS`` or a missing one, so a field added to
     hello and not argued for here cannot reach the network by the other route.

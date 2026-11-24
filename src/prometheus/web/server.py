@@ -1082,6 +1082,9 @@ def create_app(
     # A public route (web/public_routes.py), so the bearer gate does not apply and the route does its own
     # checking: no browsers, a per-peer limit, no CORS, no disk writes. Contract: docs/PAIRING-APPROVAL-API.md.
     _hello_limiter = hello_mod.new_limiter()
+    from prometheus.web.identity_challenge import identity_hosts as _identity_hosts_of
+
+    _identity_hosts = _identity_hosts_of(config)
 
     def _hello_payload(tls: bool = False) -> dict[str, Any]:
         """*tls*: whether the port being described speaks TLS (the asked port for the route, the advertised
@@ -1106,12 +1109,21 @@ def create_app(
     async def identity_challenge(request: Request):
         from prometheus.web import identity_challenge as challenge_mod
 
+        from prometheus.web.loopback import local_address
+
         tls = request.url.scheme == "https"
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001 - no body or not JSON: the nonce check refuses it
             body = None
-        return hello_mod.guarded_response(request, _hello_limiter, lambda: challenge_mod.answer(body, tls=tls))
+        # v2 (GHSA-75cg-fxc2-f93j) binds the host the client dialled: the Host header exactly as received (one of
+        # them, never X-Forwarded-Host) and the local address the connection arrived on.
+        hosts = [v for k, v in request.scope.get("headers") or () if k.lower() == b"host"]
+        host_header = hosts[0].decode("latin-1") if len(hosts) == 1 else None
+        return hello_mod.guarded_response(
+            request, _hello_limiter,
+            lambda: challenge_mod.answer(body, tls=tls, host_header=host_header, local_ip=local_address(request),
+                                         extra_hosts=_identity_hosts))
 
     # ── Root ────────────────────────────────────────────────────────
 
@@ -2365,6 +2377,12 @@ def create_app(
     # Setting it is therefore a security-relevant write, validated here.
     from prometheus.context.workspace import validate_workspace_path as _validate_workspace
 
+    def _git_touch(session_id: str) -> None:
+        """The binding changed: owner devices watching this session's git state are told if it differs now."""
+        watch = getattr(app.state, "git_watch", None)
+        if watch is not None:
+            watch.touch(session_id)
+
     @app.get("/api/sessions/{session_id}/workspace")
     async def get_session_workspace(session_id: str):
         """The effective working directory for this session and where it came
@@ -2405,6 +2423,7 @@ def create_app(
         if not raw:
             store.set_session_workspace(session_id, "", set_by="rest")
             logger.info("session workspace CLEARED for %s (rest)", session_id)
+            _git_touch(session_id)
             return {"ok": True, "session_id": session_id, "workspace": None}
         resolved, why = _validate_workspace(raw, config.get("security", {}) or {})
         if resolved is None:
@@ -2414,6 +2433,7 @@ def create_app(
         # where an operator reading the journal will see it.
         logger.warning("session workspace SET for %s → %s (rest) — this is now that "
                        "conversation's write boundary", session_id, resolved)
+        _git_touch(session_id)
         return {"ok": True, "session_id": session_id, "workspace": str(resolved)}
 
     @app.delete("/api/sessions/{session_id}/workspace")
@@ -2424,6 +2444,7 @@ def create_app(
             return JSONResponse({"error": "no durable store — session workspaces unavailable"}, status_code=503)
         store.set_session_workspace(session_id, "", set_by="rest")
         logger.info("session workspace CLEARED for %s (rest)", session_id)
+        _git_touch(session_id)
         return {"ok": True, "session_id": session_id, "workspace": None}
 
     # ── File checkpoints (item 4, 2026-09-01) ─────────────────────────
@@ -4491,10 +4512,13 @@ def create_app(
         return {"ok": True, "name": name}
 
     @app.post("/api/cron/{name}/run")
-    async def run_cron_job_now(name: str):
+    async def run_cron_job_now(name: str, request: Request):
         """Trigger a job immediately. Fire-and-forget: a job may run up to 300s, so
         the executor is dispatched as a background task and the call returns at once;
         the outcome surfaces via the job's last_run/last_status (re-GET /api/cron)."""
+        # Paused (engine/pause.py): nothing new runs. Said here, not as a 'skipped' run after a 200.
+        if (refusal := paused_response(request)) is not None:
+            return refusal
         import asyncio
 
         from prometheus.gateway.cron_scheduler import execute_job
@@ -5619,7 +5643,11 @@ def create_app(
         # its next tick, so AutoDream pauses. Never raises.
         activity.note_user_activity()
         outcomes.note_user_message(f"web:{session_id}", content)
-        session.add_user_message(content)
+        # A scoped device is not the owner: its message is marked as its own, so it teaches nothing.
+        from prometheus.engine.messages import SCOPED_DEVICE_AUTHOR
+        _identity = getattr(request.state, "device_identity", None)
+        _scoped = _identity is not None and not getattr(_identity, "is_operator", False)
+        session.add_user_message(content, **({"author": SCOPED_DEVICE_AUTHOR} if _scoped else {}))
         # pre_len AFTER the user append — the index in result.messages where
         # the loop's new content starts, same as every gateway adapter. The
         # old ``len(...) - 1`` here re-included the user turn: re-appended in
@@ -6039,6 +6067,9 @@ def create_app(
 
     @app.post("/api/computer/tasks", status_code=202)
     async def computer_task_start(request: Request):
+        # Paused (engine/pause.py): no new desktop task starts.
+        if (refusal := paused_response(request)) is not None:
+            return refusal
         runner, err = _door_runner()
         if err is not None:
             return err
@@ -6422,8 +6453,42 @@ def create_app(
 
     _KEY_VALUE_MAX_CHARS = 4096  # sanity cap; real provider keys are far shorter
 
-    def _provider_keys_payload() -> dict:
+    from prometheus.providers import plans as _plans
+
+    def _plan_fields(service_id: str) -> dict:
+        # Subscription plans (providers/plans.py), in the shape the apps record against
+        # (docs/reference/subscription-plans.md). No host anywhere: a client picks a plan by id, and the plan in use
+        # is an id too ("workspace" for a workspace host, "custom" for a hand-set endpoint on no list).
+        plans = _plans.plans_for(service_id)
+        endpoint_env = _plans.endpoint_env_for(service_id)
         return {
+            "plans": [
+                {
+                    "id": p.id,
+                    "label": p.label,
+                    "subscription": p.terms == _plans.TERMS_INTERACTIVE,
+                    # The terms label: the one-line note for a plan its provider limits to interactive use, else null.
+                    "terms": p.terms_note if p.terms == _plans.TERMS_INTERACTIVE else None,
+                    "default": i == 0,
+                    # True for the plan that takes input of its own (a workspace id and region).
+                    "custom": p.id == _plans.WORKSPACE_PLAN,
+                    # The region slugs a custom (workspace) plan accepts; empty for every other plan.
+                    "regions": list(_plans.WORKSPACE_REGIONS) if p.id == _plans.WORKSPACE_PLAN else [],
+                    "separate_keys": p.separate_keys,
+                    "models": list(p.models),
+                }
+                for i, p in enumerate(plans)
+            ],
+            "plan": _plans.active_plan(service_id, config),
+            "endpoint_set": bool(endpoint_env and os.environ.get(endpoint_env)),
+            "plan_pinned_in_config": bool(plans) and _plans.base_url_pinned_in_config(service_id, config),
+        }
+
+    def _provider_keys_payload() -> dict:
+        warnings = _plans.unattended_warnings(config)
+        return {
+            "capabilities": {"plans": 1},
+            "workspace_regions": list(_plans.WORKSPACE_REGIONS),
             "services": [
                 {
                     "id": svc.id,
@@ -6435,6 +6500,8 @@ def create_app(
                     ],
                     "docs_url": svc.docs_url,
                     "default_model": svc.default_model,
+                    **_plan_fields(svc.id),
+                    "warnings": warnings.get(svc.id, []),
                 }
                 for svc in provider_key_services(config)
             ]
@@ -6448,7 +6515,7 @@ def create_app(
     async def put_provider_keys(service_id: str, body: dict):
         import logging as _logging
 
-        from prometheus.config.env_file import set_env_value
+        from prometheus.config.env_file import set_env_values
 
         svc = next(
             (s for s in provider_key_services(config) if s.id == service_id),
@@ -6479,24 +6546,90 @@ def create_app(
             if len(value) > _KEY_VALUE_MAX_CHARS:
                 return JSONResponse(status_code=400, content={
                     "error": f"value for {name} is implausibly long"})
-            if any(ord(ch) < 0x20 for ch in value):
+            from prometheus.config.env_file import env_value_problem
+
+            if problem := env_value_problem(value):
                 # The env file is line-based — a control character (esp. \n)
                 # in a value could inject a second VAR= assignment.
                 return JSONResponse(status_code=400, content={
-                    "error": f"value for {name} contains control characters"})
+                    "error": f"value for {name} {problem}"})
             cleaned[name] = value
 
-        for name, value in cleaned.items():
+        # A plan, when one is sent, is saved TOGETHER with the key: a plan's host takes only that plan's key, so
+        # moving an old key to a new host is never what a person meant. The endpoint is written only from the
+        # fixed list in providers/plans.py (or the one workspace pattern), never from the body.
+        endpoint_write: tuple[str, str] | None = None
+        if "plan" in body or "workspace" in body:
+            plan_id = body.get("plan")
+            plan = _plans.plan_by_id(service_id, plan_id) if isinstance(plan_id, str) else None
+            if not _plans.plans_for(service_id):
+                return JSONResponse(status_code=400, content={
+                    "error": f"service {service_id!r} has no plans"})
+            if plan is None:
+                return JSONResponse(status_code=400, content={
+                    "error": "plan must be one of: "
+                             + ", ".join(p.id for p in _plans.plans_for(service_id))})
+            if _plans.active_plan(service_id, config) is None:
+                # prometheus.yaml points this service at another provider, which never reads the plan's variable.
+                return JSONResponse(status_code=409, content={
+                    "error": f"prometheus.yaml sets slash_commands.{service_id}.provider, so a plan would not "
+                             "apply; remove it to choose a plan here"})
+            key_var = svc.env_vars[0]
+            if not cleaned.get(key_var):
+                return JSONResponse(status_code=400, content={
+                    "error": f"a plan is saved together with its key: send {key_var} in values"})
+            # An endpoint set by hand (on no list) is the owner's own; replacing it is said out loud.
+            if _plans.active_plan(service_id, config) == _plans.CUSTOM_PLAN and body.get("replace_custom") is not True \
+                    and not _plans.base_url_pinned_in_config(service_id, config):
+                return JSONResponse(status_code=409, content={
+                    "error": "this provider uses an endpoint set by hand; send \"replace_custom\": true to "
+                             "replace it with a plan"})
+            if _plans.base_url_pinned_in_config(service_id, config):
+                return JSONResponse(status_code=409, content={
+                    "error": f"prometheus.yaml sets slash_commands.{service_id}.base_url, which wins over a "
+                             "saved plan; remove it to choose a plan here"})
+            if plan.id == _plans.WORKSPACE_PLAN:
+                ws = body.get("workspace")
+                if not isinstance(ws, dict):
+                    return JSONResponse(status_code=400, content={
+                        "error": 'the workspace plan needs "workspace": {"id": ..., "region": ...}'})
+                try:
+                    endpoint = _plans.workspace_endpoint(ws.get("id"), ws.get("region"))
+                except _plans.PlanError as exc:
+                    return JSONResponse(status_code=400, content={"error": str(exc)})
+            elif body.get("workspace") is not None:
+                return JSONResponse(status_code=400, content={
+                    "error": "workspace is only for the workspace plan"})
+            else:
+                # The default plan clears the variable, so the provider's own default applies.
+                endpoint = "" if plan is _plans.plans_for(service_id)[0] else plan.endpoint
+            endpoint_write = (_plans.endpoint_env_for(service_id), endpoint)
+
+        # One rewrite of the env file for the key and its endpoint together, then the live environment: a failed
+        # write changes neither, so a key is never left paired with the wrong host.
+        file_writes = dict(cleaned)
+        if endpoint_write is not None:
+            file_writes[endpoint_write[0]] = endpoint_write[1]
+        set_env_values(file_writes)  # a blank value is a deliberate blank line, api_token-style
+        for name, value in file_writes.items():
             if value:
-                set_env_value(name, value)
                 os.environ[name] = value
             else:
-                set_env_value(name, "")  # deliberate blank line, api_token-style
                 os.environ.pop(name, None)
+        for name, value in cleaned.items():
             _logging.getLogger(__name__).info(
                 "provider key %s: %s %s",
                 service_id, "set" if value else "cleared", name,
             )
+        if endpoint_write is not None:
+            # The plan id, never the endpoint: a workspace host names the account.
+            _logging.getLogger(__name__).info(
+                "provider plan %s: %s (%s)", service_id, body.get("plan"), endpoint_write[0])
+
+        # Sessions already on this provider rebuild against what was just saved on their next turn: no restart.
+        router = getattr(app.state, "model_router", None)
+        if router is not None and svc.kind == "llm":
+            router.refresh_preset(service_id, config)
 
         # Same booleans as GET so the client refreshes its view from us.
         return _provider_keys_payload()
@@ -6563,7 +6696,10 @@ def create_app(
         return {"logged_out": xai_oauth.logout()}
 
     @app.post("/api/code")
-    async def create_coding_run(body: dict):
+    async def create_coding_run(body: dict, request: Request):
+        # Paused (engine/pause.py): no new coding run starts.
+        if (refusal := paused_response(request)) is not None:
+            return refusal
         from uuid import uuid4 as _uuid4
 
         from prometheus.coding.managed import create_coding_managed_task
@@ -7098,6 +7234,12 @@ def create_app(
     from prometheus.web.speech_routes import register_speech_routes
 
     register_speech_routes(app, config=config, devices=_devices, auth_on=lambda: bool(_api_token))
+
+    # ── Git status of a conversation's work folder (capability git/1; contract: Beacon's git-status.md) ────
+    # Read-only, owner only (web/route_access.py); the launcher lets the watcher hear the bridge's frames.
+    from prometheus.web.git_routes import register_git_routes
+
+    register_git_routes(app, config=config, conversation_store=_conversation_store)
 
     # ── Static files (must be last — catch-all) ─────────────────────
 

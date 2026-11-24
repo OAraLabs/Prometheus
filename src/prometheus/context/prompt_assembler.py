@@ -64,6 +64,93 @@ def _load_bootstrap_file(filename: str) -> str | None:
         return None
 
 
+#: What a held run is told when its profile names no bootstrap file that exists. Neutral on purpose: it names no
+#: machine, owner, path or fact, and the run's tools are the profile's alone.
+HELD_DEFAULT_INSTRUCTIONS = (
+    "You are an assistant working under a restricted profile. Use only the tools you are given; a tool you "
+    "were not given is not available to you. You have no knowledge of the machine you run on, its owner or "
+    "its files beyond what a tool you were given returns."
+)
+
+
+_HELD_FILE_WARNED: set[tuple[str, str, str]] = set()
+
+
+def _warn_once(profile_name: str, filename: object, folder: Path, why: str, hint: str = "") -> None:
+    key = (profile_name, str(filename), str(folder))
+    if key in _HELD_FILE_WARNED:
+        return
+    _HELD_FILE_WARNED.add(key)
+    log.warning(
+        "held profile %r names bootstrap file %r, which is not used: %s. A run held to a profile reads its "
+        "bootstrap files only from %s.%s",
+        profile_name, filename, why, folder, hint,
+    )
+
+
+def held_system_prompt(profile: object, client_instructions: str = "") -> str:
+    """The system prompt of a run the operator HOLDS to *profile*.
+
+    The files the profile itself names in ``bootstrap_files``, read ONLY from the profiles folder
+    (``~/.prometheus/profiles/``, the folder its YAML lives in and every write floor already covers, so a
+    model-written shell cannot rewrite what a restricted caller is told); a name is a plain ``.md`` file name,
+    never a path. Anything else a profile names is refused with a logged message that says where the file goes. Then
+    what the connecting client sent as instructions on the OpenAI-compatible route, and a neutral line when the
+    profile names no file that exists. NOTHING of the owner's prompt: the daemon's one boot-time prompt carries the
+    owner's persona and instructions, the machine and network summary, the "# Memory" section and the workspace's
+    project files, and a restricted caller is not the owner. A profile that did not name its bootstrap files
+    (``bootstrap_declared`` false) names none.
+    """
+    from prometheus.config.profiles import profiles_dir
+    from prometheus.config.paths import config_dir_path
+
+    sections: list[str] = []
+    name = str(getattr(profile, "name", "?"))
+    if getattr(profile, "bootstrap_declared", False):
+        folder = profiles_dir()
+        if folder.is_symlink():
+            _warn_once(name, "(the folder)", folder,
+                       "the profiles folder is a symbolic link, and the write floors cover the folder it points at "
+                       "only if that is also under the config folder")
+        files = getattr(profile, "bootstrap_files", None) or []
+        if isinstance(files, str):          # `bootstrap_files: SOUL.md` is one file, not its letters
+            files = [files]
+        for filename in files:
+            if (not isinstance(filename, str) or not filename.endswith(".md") or filename.startswith(".")
+                    or Path(filename).name != filename):
+                _warn_once(name, filename, folder, "it is not a plain .md file name (no path, no leading dot)")
+                continue
+            try:
+                real_folder = folder.resolve()
+                path = real_folder / filename
+                real = path.resolve()
+                if real.parent != real_folder:
+                    _warn_once(name, filename, folder, "it is a link that leaves that folder")
+                    continue
+                if not real.is_file():
+                    kept = config_dir_path() / filename
+                    hint = (f" A file of that name is in the config folder ({kept.parent}); copy it into {folder}."
+                            if kept.is_file() else f" Put the file in {folder}.")
+                    _warn_once(name, filename, folder, "there is no such file there", hint)
+                    continue
+                content = real.read_text(encoding="utf-8").strip()
+            except Exception:
+                log.warning("held profile %r: bootstrap file %r could not be read; skipped", name, filename,
+                            exc_info=True)
+                continue
+            if not content:
+                continue
+            if filename == "ANATOMY.md":
+                sections.append(_infrastructure_block(content, None))
+            else:
+                sections.append(f"<!-- Bootstrap: profiles/{filename} -->\n{content}")
+    if not sections:
+        sections.append(HELD_DEFAULT_INSTRUCTIONS)
+    if client_instructions.strip():
+        sections.append(client_instructions.strip())
+    return "\n\n".join(sections)
+
+
 def _load_memory_and_user() -> str:
     """Load MEMORY.md + USER.md content formatted for the system prompt.
 

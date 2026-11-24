@@ -95,6 +95,8 @@ async def test_the_dispatcher_turns_that_signal_into_a_TURN_push(tmp_path):
         def push_targets(self):
             class T: id, apns_token, environment, bundle_id, push_failures = "d1", "tok", "production", "b", 0
             return [T()]
+        def quiet_push_targets(self, session_id):  # owner + the session's device (test_quiet_push_scoped.py)
+            return self.push_targets()
         def reset_push_failures(self, *a): pass
         def record_push_success(self, *a): pass
 

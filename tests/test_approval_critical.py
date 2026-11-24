@@ -16,7 +16,7 @@ import types
 import pytest
 
 from prometheus.permissions.approval_queue import ApprovalQueue, PendingAction
-from prometheus.permissions.argument_view import arguments_were_cut
+from prometheus.permissions.argument_view import NOTE_KEY, OVERFLOW_KEY, redact_arguments, view_was_cut
 from prometheus.permissions.critical import (
     DEFAULT_CRITICAL_COMMANDS,
     DEFAULT_CRITICAL_TOOLS,
@@ -101,13 +101,43 @@ def test_a_wrong_shape_falls_back_to_the_default_list():
     assert rules.commands == DEFAULT_CRITICAL_COMMANDS
 
 
+def _cut(arguments) -> bool:
+    """What the capture sets ``arguments_cut`` to: the shipped view's own word on whether it masked, cut or left out."""
+    return view_was_cut(redact_arguments(arguments))
+
+
 def test_arguments_cut_or_redacted_are_reported():
-    assert arguments_were_cut({"command": "x" * 500})
+    assert _cut({"command": "x" * 500})
     fake = "sk-" + "q7" * 16                                 # built here so no key-shaped literal is committed
-    assert arguments_were_cut({"api" + "_key": fake})
-    assert arguments_were_cut({f"k{i}": "v" * 150 for i in range(10)})
-    assert not arguments_were_cut({"command": "ls -la"})
-    assert not arguments_were_cut(None)
+    assert _cut({"api" + "_key": fake})
+    assert _cut({f"k{i}": "v" * 150 for i in range(10)})
+    assert not _cut({"command": "ls -la"})
+    assert not _cut(None)
+
+
+def test_what_the_view_leaves_out_counts_as_cut_but_plumbing_does_not():
+    """0.9.21's view says so in a leading line (an argument named ``_x`` left out, a worker's arguments not all sent)
+    or an overflow row (more arguments than fit); the flag reads exactly that, so it cannot disagree with the view."""
+    assert _cut({"_hidden": "x", "command": "ls"})
+    assert _cut({"_hidden": "x"})                           # nothing else to show: still a request to answer in the app
+    assert _cut({f"a{i}": "v" for i in range(41)})          # the view's overflow row (the queue refuses such a call first)
+    assert not _cut({"element_token": "t", "text": "hi"})   # the three validated desktop handles are plumbing
+    assert not _cut({"command": "ls", "note": ""})          # an empty value is shown, not dropped
+    view = redact_arguments({"_hidden": "x", "command": "ls"})
+    assert view is not None and NOTE_KEY in view and OVERFLOW_KEY not in view
+    assert view_was_cut({OVERFLOW_KEY: "(2 more argument(s) not shown)", "a": "1"})
+
+
+def test_a_view_that_cannot_be_read_counts_as_cut():
+    class _Odd(dict):
+        def __contains__(self, key):
+            raise TypeError("odd view")
+
+        def __bool__(self):
+            return True
+
+    assert view_was_cut(_Odd({"a": 1})) is True
+    assert view_was_cut(None) is False and view_was_cut({}) is False
 
 
 def test_built_in_reasons():
@@ -353,12 +383,8 @@ def test_redirect_to_a_file_by_and_word_is_critical(command):
     assert CriticalRules().matches("bash", {"command": command}), command
 
 
-def test_a_cut_check_that_raises_counts_as_cut_and_the_request_is_still_created():
-    """Review 2026-11-12 (#917 LOW): any error fails toward critical, and request creation never raises for it."""
-    from prometheus.permissions import argument_view
-
-    class _Odd(dict):
-        def __iter__(self):
-            raise TypeError("odd arguments")
-
-    assert argument_view.arguments_were_cut(_Odd({"a": 1})) is True
+def test_a_request_with_hidden_arguments_is_critical_and_says_so():
+    """A call whose only argument is named ``_x`` shows a person nothing to read: it is answered in the app."""
+    q, _bus = _queue()
+    served = asyncio.run(_ask(q, "bash", {"_hidden": "x"}))
+    assert served["critical"] is True

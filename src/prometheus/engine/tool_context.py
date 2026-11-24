@@ -42,6 +42,17 @@ TURN_TRUST: contextvars.ContextVar[tuple[bool, str | None]] = contextvars.Contex
     "prometheus_turn_trust", default=(True, None))
 
 
+#: True only while the agent loop runs a call the owner approved because the tool asked for it
+#: (``BaseTool.requires_owner_approval``). A ContextVar the loop sets around that one ``execute``, so nothing a
+#: caller passes in metadata can claim it.
+OWNER_APPROVED: contextvars.ContextVar[bool] = contextvars.ContextVar("prometheus_owner_approved", default=False)
+
+#: The exact reason the owner approved, beside OWNER_APPROVED: the card they read. A tool that shows the state it
+#: will change (the memory tool) rebuilds its card at the write and refuses if it differs, so a card that went
+#: stale between the ask and the answer changes nothing. None outside such a call.
+APPROVED_CARD: contextvars.ContextVar[str | None] = contextvars.ContextVar("prometheus_approved_card", default=None)
+
+
 #: Headers a chat request handed named MCP servers for this turn only: {server: {Header: value}}. Set by the route
 #: around the turn (``turn_mcp_headers``), read by the MCP adapter at each call; None outside such a turn. A
 #: ContextVar so it follows the turn and its tool tasks and nothing else: a concurrent turn never sees it. The

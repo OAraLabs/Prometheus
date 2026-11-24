@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -62,8 +61,18 @@ class TestMemoryToolRegistration:
         pytest.fail("'memory' tool not found in registry")
 
 
+def _approved(tool, call):
+    """Run *call* = (arguments, context) as the agent loop runs it after the owner approved it (GHSA-f68r-xfv4-83fr:
+    every change asks, and the write is checked against the card the owner read)."""
+    from tests.support.owner_approval import owner_approved
+
+    arguments, context = call
+    with owner_approved(tool, arguments):
+        return asyncio.run(tool.execute(arguments, context))
+
+
 class TestMemoryToolEndToEnd:
-    """Invoking MemoryTool writes to MEMORY.md / USER.md at the canonical path."""
+    """Invoking MemoryTool, once the owner approved it, writes to MEMORY.md / USER.md at the canonical path."""
 
     def test_add_appends_to_memory_md(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -86,7 +95,7 @@ class TestMemoryToolEndToEnd:
         tool = MemoryTool()
         ctx = ToolExecutionContext(cwd=str(tmp_path))
 
-        result = asyncio.run(tool.execute(
+        result = _approved(tool, (
             MemoryToolInput(
                 operation="add",
                 target="memory",
@@ -121,7 +130,7 @@ class TestMemoryToolEndToEnd:
 
         tool = MemoryTool()
         ctx = ToolExecutionContext(cwd=str(tmp_path))
-        asyncio.run(tool.execute(
+        _approved(tool, (
             MemoryToolInput(
                 operation="add",
                 target="user",
@@ -154,12 +163,12 @@ class TestMemoryToolEndToEnd:
         tool = MemoryTool()
         ctx = ToolExecutionContext(cwd=str(tmp_path))
         for entry in ("fact one", "fact two"):
-            asyncio.run(tool.execute(
+            _approved(tool, (
                 MemoryToolInput(operation="add", target="memory", entry=entry),
                 ctx,
             ))
 
-        result = asyncio.run(tool.execute(
+        result = _approved(tool, (
             MemoryToolInput(operation="list", target="memory"),
             ctx,
         ))

@@ -195,6 +195,7 @@ TXT records. No secrets, no paths, no usernames, no addresses:
 | `fp` | `3fa9c1e07b2d4a68` | first 16 hex chars of SHA-256 of the instance public key (SPKI DER). A display and change-detection hint, never a trust anchor. Empty if the instance has no key yet. |
 | `pair` | `approve` | `approve` when approval requests are enabled and the daemon is configured; `code` when a 6-digit code works (setup mode only, until Beacon's on-demand codes exist); `token` when neither works (no approval route is offered and no 6-digit-code route exists yet: the API token has to be entered); `none` when the daemon runs with auth deliberately off (an explicit empty token): there is nothing to pair into, and `POST /api/pair/requests` answers `403 pairing_unavailable` |
 | `tls` | `1` | `1` when the advertised port speaks TLS, else `0` |
+| `ic` | `2` | the highest identity-challenge version this daemon speaks (`POST /api/identity/challenge`, section 7.3); `0` in setup mode, which has no challenge route. A hint a relay can edit: a client that needs v2 asks for it and checks the version of the ANSWER. |
 
 Config opt-out: `discovery.mdns: false`. `zeroconf` (LGPL-2.1-or-later; one dependency of its own, `ifaddr`, MIT) is the optional `discovery` extra, not a base dependency and not in `full`. If advertising is wanted (home network, `discovery.mdns` on, an eligible address) and the library is missing, the daemon starts, serves and pairs exactly as before, logs one WARNING, `GET /api/network` reports `advertising: false` with the reason, and `oara doctor` says so and names the extra. A silent no-op would be the config-dark failure this repo already has rules against.
 
@@ -205,10 +206,10 @@ Crash behaviour: a SIGKILLed daemon cannot send a goodbye packet, so its record 
 Unauthenticated. No CORS headers (the request is refused if it carries `Origin`). `Cache-Control: no-store`. Served by the normal app **and** by the setup-mode server, from one shared function, so a client never needs to know which one it hit. The two refuse an `Origin` request in different places: the normal app in `_check_bearer_token` (through `PUBLIC_ROUTES`, section 8), the setup server in the route itself, as `/api/setup/pair` does today, because it does not use that gate. Both are tested.
 
 ```json
-{"v": "0.9.7", "name": "Will's Mac mini", "agent": "Prometheus", "fp": "3fa9c1e07b2d4a68", "pair": "approve", "tls": false}
+{"v": "0.9.7", "name": "Will's Mac mini", "agent": "Prometheus", "fp": "3fa9c1e07b2d4a68", "pair": "approve", "tls": false, "ic": 2}
 ```
 
-Exactly these six fields: the same six as the TXT record, `tls` as a boolean here and `"1"`/`"0"` there. An allowlist test pins the JSON key set and checks the TXT dictionary agrees with it, so a new field fails both. Not in it, ever: addresses, OS version, user names, model, uptime, session counts, device counts, whether anyone is paired.
+Exactly these seven fields (`ic` is the seventh, an integer, absent from daemons before 0.9.21): the same seven as the TXT record, `tls` as a boolean here and `"1"`/`"0"` there, `ic` as a number here and a string there. An allowlist test pins the JSON key set and checks the TXT dictionary agrees with it, so a new field fails both. Not in it, ever: addresses, OS version, user names, model, uptime, session counts, device counts, whether anyone is paired.
 
 It replaces the 401-body fingerprint that Beacon and the Mac app's launcher use today to answer "is there a Prometheus here" (the installer's contract says so: hello is "planned by the pairing-approval work and is not built"). They keep the old probe working (its wording is unchanged) and prefer hello when it answers.
 

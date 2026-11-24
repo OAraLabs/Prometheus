@@ -283,3 +283,15 @@ def test_the_agents_shell_never_sees_the_key_variable(world, keyed_box, env_file
     child = scrubbed_env()
     assert name not in child
     assert KEY not in child.values()
+
+
+@pytest.mark.parametrize("ch", ["\n", "\r", "\x85", " ", " ", "\x00"],
+                         ids=["LF", "CR", "U+0085", "U+2028", "U+2029", "NUL"])
+def test_a_key_with_a_line_break_or_control_character_is_refused(world, keyed_box, env_file, ch):
+    _, port = keyed_box
+    piece = found(world, port)
+    response = world.as_("global", "POST", f"/api/pieces/{piece['id']}/approve",
+                         json={"secret": f"abc{ch}INJECTED_VAR=planted"})
+    assert response.status_code == 400
+    assert not env_file.exists() or "INJECTED_VAR" not in env_file.read_text()
+    assert "planted" not in response.text
