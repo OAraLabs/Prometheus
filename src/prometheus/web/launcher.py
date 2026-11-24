@@ -263,6 +263,11 @@ async def launch_web(
     from prometheus.web.speech_routes import attach_bridge
 
     attach_bridge(app, bridge)
+    # The git status of a work folder (web/git_routes.py): the watcher hears the bridge's frames and tells owner
+    # sockets when a folder changed; its startup proves the process limit holds before git/1 is advertised.
+    from prometheus.web.git_routes import attach_bridge as attach_git_watch
+
+    attach_git_watch(app, bridge)
     # POST /api/restart: the daemon's own restart, when it was started as the daemon.
     if request_restart is not None:
         app.state.request_restart = request_restart

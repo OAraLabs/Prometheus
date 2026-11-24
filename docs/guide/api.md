@@ -60,6 +60,7 @@ app and kept current by CI, see
 | GET | `/api/sessions/{id}/workspace` | The session's working directory and its source (`session` or `daemon`), plus the daemon's cwd and configured workspace roots |
 | PUT | `/api/sessions/{id}/workspace` | Bind a working directory: `{"path": "/abs/dir"}`; blank clears. Refused unless absolute, an existing directory, not `/`, not under `security.denied_paths`. **The gate follows the session:** from the next turn this is the conversation's write boundary (`write_file`/`edit_file`, bash's lock and write floor), where relative paths resolve, and where its instruction files (PROMETHEUS.md, CLAUDE.md, AGENTS.md, …) are read |
 | DELETE | `/api/sessions/{id}/workspace` | Clear it — the session follows the daemon again |
+| GET | `/api/sessions/{id}/git` | Owner only (a scoped device gets `403 operator_only`). What git says about the session's bound work folder, read-only: `{v: 1, kind: "state" \| "none" \| "unreadable", top, state: {branch, commit (7 hex), upstream, ahead, behind, staged, unstaged, untracked, conflicted, changed, operation}, truncated, pr, read_at}`. `none`: no work folder, not in a repository, or no git; `unreadable` carries `why`: `unsafe_here`, `too_slow`, `too_big` or `not_read` (a repository that borrows another's history, or one git could not read). `pr` is `{number, state: open\|merged\|closed, draft, mergeable, checks, url}` or null, from `gh` on this computer (github.com remotes only; null without `gh` or a sign-in). No file names, diff, commit message or remote address is ever in the answer. `ETag` / `If-None-Match` give `304`. See "Git status of a work folder" below |
 | GET | `/api/sessions/{id}/checkpoints` | The session's file checkpoints, newest first — one per turn, taken before any tool runs, only for sessions with a workspace |
 | GET | `/api/sessions/{id}/checkpoints/{cid}` | The checkpoint's files, what was skipped (too large), and what a restore would change now (`changed`, `deleted`, `added`, `unchanged`) |
 | POST | `/api/sessions/{id}/checkpoints/{cid}/restore` | `{"confirm": "<cid>", "dry_run": false}` — rewrites changed/deleted files from the checkpoint and removes files created since; names every path. `dry_run` reports without touching anything. Naming the checkpoint twice is the confirmation |
@@ -142,6 +143,10 @@ A chat project is a named folder on this Prometheus's computer with standing ins
 ### Speech — a reply read aloud
 
 Through the voice box Prometheus already uses (`stt.url` / `tts.url`, or one approved by its address). The owner and chat-only devices may call all four, with chat's limits; a device hears only its own sessions. The `subscribed` ack lists `speech` in `server_capabilities` when a voice box is set up. Design: [docs/design/speech-route.md](../design/speech-route.md).
+
+### Git status of a work folder
+
+`GET /api/sessions/{id}/git` is advertised by `git/1` in `server_capabilities` of the `subscribed` ack, and only where Prometheus can prove git is held: git runs under a process limit of zero (`RLIMIT_NPROC`), set by a small `sh` that then becomes git, so a program named in a repository's own configuration (`core.fsmonitor`, a `filter.*.clean`, a submodule's settings) cannot be started by it. A self-test at startup starts a child under the limit; where one still starts (root, a container that does not count processes per user) the route answers `unreadable` / `unsafe_here` and `git/1` is not advertised. The reading is also fixed: git is found by absolute path (never the daemon's `PATH`), its arguments and environment are fixed lists, a work folder's repository must be plainly there (`<top>/.git`, a linked worktree that names the folder back, or a submodule) with a top the daemon would accept as a workspace, a repository that borrows another's history (a `commondir` file, an alternates list, links in place of its index, refs or objects) is refused as `not_read`, and each command has 4 seconds and 4 MB. Nothing writes, fetches or pushes, and nothing here is a tool the agent can call. The pull request comes from `gh`, run at `/` with `--repo owner/name` parsed from the remote, so it never reads the folder's own git settings; answers are kept 60 seconds, and at most six questions go to GitHub a minute.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -433,6 +438,7 @@ Chat lifecycle:
 |---|---|
 | `connected` | Auth accepted; connection metadata |
 | `subscribed` | Subscription ack. `server_capabilities` lists what this daemon can do for the client: `voice_input` when an audio `chat_upload` can be transcribed here (`stt.url`, `whisper.url` or an approved voice box is set, or a local Whisper engine and ffmpeg are installed) |
+| `workspace_git_changed` | Owner devices watching a session: the git state of its work folder changed since a client last read it. `{session_id, read_at}` only, no state: fetch `GET /api/sessions/{id}/git`. Sent after a turn ends, after a tool call in the session, when the workspace binding changes, and every 30 s for a session an owner device is watching; at most one per session per 2 s. Not in the durable event feed. Needs the `git/1` capability |
 | `chat_message` | A complete message (user echo, assistant reply, or slash-command result) |
 | `chat_delta` | Streaming token delta |
 | `agent_state` | Agent thinking/idle state changes (carries `session_id`) |

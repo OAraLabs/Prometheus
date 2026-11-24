@@ -45,7 +45,7 @@ import stat
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +259,19 @@ async def fork_limit_enforced() -> bool:
             return False
         _enforced = limited.code != NO_FORK_UNSET and b"started:0" not in limited.out
         return _enforced
+
+
+def capability_ready() -> bool:
+    """Whether ``git/1`` may be advertised: the self-test found the limit enforced here AND a git was found. Only what
+    is already known: this never runs anything, so it is safe to ask from a frame handler."""
+    return _enforced is True and _git_checked and _git_program is not None
+
+
+async def prepare() -> bool:
+    """The startup self-test: find git, and prove the limit. Whether ``git/1`` may be advertised."""
+    await asyncio.to_thread(git_program)
+    await fork_limit_enforced()
+    return capability_ready()
 
 
 def forget_probe() -> None:
@@ -529,12 +542,9 @@ class GitRead:
     state: dict[str, object] = field(default_factory=dict)
     truncated: bool = False
     why: str | None = None
-    #: The branch and its upstream, for the pull-request lookup; never in the answer.
     git_dir: str | None = None
-
-    def fingerprint(self) -> tuple:
-        """What a client would see change (everything but the time)."""
-        return (self.kind, self.top, tuple(sorted(self.state.items(), key=lambda kv: kv[0])), self.truncated, self.why)
+    #: When it was read (wall clock), set when the read finishes.
+    read_at: float = 0.0
 
 
 NONE = GitRead("none")
@@ -564,6 +574,7 @@ async def _guarded(folder: str, top_allowed: Callable[[str], bool]) -> GitRead:
         except Exception:
             logger.warning("git read of a work folder failed", exc_info=True)
             result = _unreadable(NOT_READ)
+    result = replace(result, read_at=time.time())
     _fresh[folder] = (time.monotonic(), result)
     if len(_fresh) > 256:
         for k in sorted(_fresh, key=lambda key: _fresh[key][0])[:128]:
@@ -571,22 +582,27 @@ async def _guarded(folder: str, top_allowed: Callable[[str], bool]) -> GitRead:
     return result
 
 
-async def read_git(folder: str, top_allowed: Callable[[str], bool]) -> GitRead:
+async def read_git(folder: str, top_allowed: Callable[[str], bool], *, max_age: float = FRESH_S) -> GitRead:
     """Read ``folder``'s git state. ``top_allowed`` is the daemon's own rule for a repository top (the workspace
     validator): it is asked BEFORE ``status`` runs, so a top the daemon would not accept is never walked.
 
-    Never raises. Reads of one folder at once share one run; a second read within ``FRESH_S`` is the first one's.
+    Never raises. Reads of one folder at once share one run; a second read within ``max_age`` seconds (``FRESH_S``
+    unless told otherwise) is the first one's.
     """
     if not isinstance(folder, str) or not folder.startswith("/") or "\0" in folder or "\n" in folder:
         return NONE
     hit = _fresh.get(folder)
-    if hit is not None and time.monotonic() - hit[0] < FRESH_S:
+    if hit is not None and time.monotonic() - hit[0] < max_age:
         return hit[1]
     task = _inflight.get(folder)
     if task is None:
         task = asyncio.ensure_future(_guarded(folder, top_allowed))
         _inflight[folder] = task
-        task.add_done_callback(lambda _t, f=folder: _inflight.pop(f, None))
+
+        def done(_t: object, f: str = folder) -> None:
+            _inflight.pop(f, None)
+
+        task.add_done_callback(done)
     return await asyncio.shield(task)
 
 
@@ -606,7 +622,7 @@ async def open_repo(folder: str, top_allowed: Callable[[str], bool]) -> Opened |
     repository does not borrow another's history. A GitRead (none or unreadable) when any fails."""
     if not await fork_limit_enforced():
         return _unreadable(UNSAFE_HERE)
-    git = git_program()
+    git = await asyncio.to_thread(git_program)
     if git is None:
         return NONE
     env = read_env()
@@ -671,7 +687,7 @@ def payload(read: GitRead, *, pr: dict[str, object] | None = None, read_at: floa
         out.update({"top": read.top, "state": dict(read.state), "truncated": read.truncated, "pr": pr})
     elif read.kind == "unreadable":
         out["why"] = read.why or NOT_READ
-    out["read_at"] = read_at if read_at is not None else time.time()
+    out["read_at"] = read_at if read_at is not None else (read.read_at or time.time())
     return out
 
 

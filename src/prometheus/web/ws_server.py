@@ -440,6 +440,33 @@ class WebSocketBridge:
                                _client_label(ws), event.get("type", "?"), type(exc).__name__, exc)
         return sent
 
+    def operator_sockets_watching(self, session_id: str) -> list[Any]:
+        """Operator sockets that would be sent a frame about *session_id*: no subscribe filter (the firehose, the
+        default) or a filter that names it."""
+        out = []
+        for ws in self.operator_sockets():
+            sessions = self._ws_filters.get(ws)
+            if not sessions or session_id in sessions:
+                out.append(ws)
+        return out
+
+    async def send_to_operators_watching(self, event: dict[str, Any], session_id: str) -> int:
+        """Send *event* to the operator sockets watching *session_id* and no one else. Not the SignalBus: nothing
+        about it is durable or replayed. Returns how many took it; a send that fails drops that socket."""
+        raw = json.dumps(event)
+        sent = 0
+        for ws in self.operator_sockets_watching(session_id):
+            try:
+                await ws.send(raw)
+                sent += 1
+            except Exception as exc:
+                self._frames_dropped += 1
+                self._clients.discard(ws)
+                self._clients_discarded += 1
+                logger.warning("WS frame DROPPED for client %s (type=%s): %s: %s",
+                               _client_label(ws), event.get("type", "?"), type(exc).__name__, exc)
+        return sent
+
     async def _on_pairing_event(self, kind: str, payload: dict[str, Any]) -> bool:
         frame_type = {"pending": "pairing_pending", "resolved": "pairing_resolved"}.get(kind)
         if frame_type is None:
@@ -1083,6 +1110,10 @@ class WebSocketBridge:
         caps += ["speech"] if speech_configured(self.config) else []
         caps.append("pause")          # PUT/DELETE /api/pause, `paused` on /api/status (engine/pause.py)
         caps.append("plans")          # subscription plans on /api/providers/keys (providers/plans.py)
+        from prometheus.security.git_read import capability_ready
+
+        if capability_ready():        # GET /api/sessions/{id}/git: only where the startup self-test proved the floor
+            caps.append("git/1")
         return [*caps, "projects"]  # chat projects (web/chat_projects_routes.py): always served
 
     async def _system_note(self, session_id: str, content: str) -> None:

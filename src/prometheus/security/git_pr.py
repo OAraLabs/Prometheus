@@ -205,7 +205,17 @@ UNKNOWN = PrRead("unknown")
 _known: dict[str, tuple[float, bool, PrRead]] = {}
 _asking: dict[str, asyncio.Future[PrRead]] = {}
 _asked: list[float] = []
-_state = {"no_gh_since": 0.0, "stalled_at": 0.0, "place": ""}
+
+
+class _Memory:
+    """What was learned about gh: when it was last found absent, when it had to be stopped, where it is."""
+
+    no_gh_since = 0.0
+    stalled_at = 0.0
+    place = ""
+
+
+_state = _Memory()
 _turn: asyncio.Lock | None = None
 
 
@@ -215,7 +225,9 @@ def reset(places: tuple[str, ...] | None = None) -> None:
     _known.clear()
     _asking.clear()
     _asked.clear()
-    _state.update(no_gh_since=0.0, stalled_at=0.0, place="")
+    _state.no_gh_since = 0.0
+    _state.stalled_at = 0.0
+    _state.place = ""
     _turn = None
     if places is not None:
         GH_PLACES = places
@@ -230,9 +242,9 @@ def _remember(key: str, good: bool, read: PrRead) -> None:
 
 async def _ask(repo: str, branch: str, args: list[str]) -> PrRead:
     now = time.monotonic()
-    if _state["no_gh_since"] and now - _state["no_gh_since"] < NO_GH_S:
+    if _state.no_gh_since and now - _state.no_gh_since < NO_GH_S:
         return NONE
-    if _state["stalled_at"] and now - _state["stalled_at"] < STALLED_S:
+    if _state.stalled_at and now - _state.stalled_at < STALLED_S:
         return UNKNOWN
     while _asked and now - _asked[0] >= 60:
         _asked.pop(0)
@@ -241,16 +253,16 @@ async def _ask(repo: str, branch: str, args: list[str]) -> PrRead:
     _asked.append(now)
     env = gh_env()
     key = f"{repo}\n{branch}"
-    places = [p for p in ([_state["place"]] if _state["place"] else [])] + [p for p in GH_PLACES if p != _state["place"]]
+    places = [p for p in ([_state.place] if _state.place else [])] + [p for p in GH_PLACES if p != _state.place]
     for place in places:
         if not (os.path.isfile(place) and os.access(place, os.X_OK)):
             continue
         # Not under the process limit; its own session, so a helper it started is stopped with it.
         r = await gr.run([place, *args], "/", env, script='exec "$@"', timeout=GH_TIME_S, limit=GH_OUT_MAX)
-        _state["place"] = place
-        _state["no_gh_since"] = 0.0
+        _state.place = place
+        _state.no_gh_since = 0.0
         if r.timed_out:
-            _state["stalled_at"] = time.monotonic()
+            _state.stalled_at = time.monotonic()
             return UNKNOWN
         if r.code != 0 or r.too_big:
             # Not signed in, no network, no such repository for this account: not known, for a while.
@@ -260,8 +272,8 @@ async def _ask(repo: str, branch: str, args: list[str]) -> PrRead:
         read = PrRead("pr", pr) if pr else NONE
         _remember(key, True, read)
         return read
-    _state["place"] = ""
-    _state["no_gh_since"] = time.monotonic()
+    _state.place = ""
+    _state.no_gh_since = time.monotonic()
     return NONE
 
 
