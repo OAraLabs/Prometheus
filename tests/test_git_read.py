@@ -306,7 +306,8 @@ class TestOrdinaryRepositories:
         g(m, "checkout", "-q", "main")
         (m / "a.txt").write_text("ours\n")
         g(m, "commit", "-q", "-am", "ours")
-        subprocess.run(["git", "merge", "-q", "other"], cwd=m, env=_env(), capture_output=True)  # the conflict is the point
+        subprocess.run(["git", "-c", "user.name=Smoke", "-c", "user.email=smoke@example.invalid", "merge", "-q", "other"],
+                       cwd=m, env=_env(), capture_output=True)       # the conflict is the point
         s = (await read(m)).state
         assert (s["operation"], s["conflicted"], s["branch"]) == ("merge", 1, "main")
 

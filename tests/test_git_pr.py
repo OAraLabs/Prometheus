@@ -91,6 +91,8 @@ class TestWhichRepositories:
 
 class TestTheEnvironmentGhRunsIn:
     def test_a_short_fixed_list_no_token_and_the_host_is_github_com(self, monkeypatch):
+        for k in ("XDG_CONFIG_HOME", "GH_CONFIG_DIR"):       # a CI runner sets some of these; this test is about the rest
+            monkeypatch.delenv(k, raising=False)
         for k, v in {"GH_TOKEN": "never", "GITHUB_TOKEN": "never", "GH_HOST": "evil.example", "GH_ENTERPRISE_TOKEN": "never",
                      "GIT_DIR": "/evil", "PATH": ".:/evil", "GH_CONFIG_DIR": "relative/evil"}.items():
             monkeypatch.setenv(k, v)
