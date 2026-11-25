@@ -277,6 +277,7 @@ Artifacts are **content-addressed**: ids are a sha256 prefix of the file bytes, 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/approvals` | Poll pending approval requests. Each carries `critical`: `true` means answer it in the app, never from a notification (its push has no Approve). Rules: `permissions/critical.py`, owner lists `push.critical_*`. A nudge about where to answer, not a security guard: every request already needs a person, and a request judged ordinary is still read and approved by one |
+| GET | `/api/approvals/{request_id}` | One request: `200` with the list's entry while pending, `410` with `resolution` and `detail` once it has ended, `404` when it is not yours or was never raised here |
 | POST | `/api/approvals/{request_id}/approve` | Approve a request |
 | POST | `/api/approvals/{request_id}/deny` | Deny a request |
 
@@ -437,7 +438,7 @@ Chat lifecycle:
 | Type | Purpose |
 |---|---|
 | `connected` | Auth accepted; connection metadata |
-| `subscribed` | Subscription ack. `server_capabilities` lists what this daemon can do for the client: `voice_input` when an audio `chat_upload` can be transcribed here (`stt.url`, `whisper.url` or an approved voice box is set, or a local Whisper engine and ffmpeg are installed); `push_node_pub` when APNs push is on and the node has a key, meaning every push body this daemon sends carries `node_pub`, the node's public key (base64 of 32 raw bytes, the same value as `node_pub` in `GET /api/status` and the identity challenge), so a phone paired with several instances knows which one sent it. A daemon without `push_node_pub` does not send the field |
+| `subscribed` | Subscription ack. `server_capabilities` lists what this daemon can do for the client: `voice_input` when an audio `chat_upload` can be transcribed here (`stt.url`, `whisper.url` or an approved voice box is set, or a local Whisper engine and ffmpeg are installed); `push_node_pub` when APNs push is on and the node has a key, meaning every push body this daemon sends carries `node_pub`, the node's public key (base64 of 32 raw bytes, the same value as `node_pub` in `GET /api/status` and the identity challenge), so a phone paired with several instances knows which one sent it. A daemon without `push_node_pub` does not send the field. `approval_by_id`, always: `GET /api/approvals/{request_id}` exists (it says the route is there, not that approvals are switched on; with no approval queue every id is a 404) |
 | `workspace_git_changed` | Owner devices watching a session: the git state of its work folder changed since a client last read it. `{session_id, read_at}` only, no state: fetch `GET /api/sessions/{id}/git`. Sent after a turn ends, after a tool call in the session, when the workspace binding changes, and every 30 s for a session an owner device is watching; at most one per session per 2 s. Not in the durable event feed. Needs the `git/1` capability |
 | `chat_message` | A complete message (user echo, assistant reply, or slash-command result) |
 | `chat_delta` | Streaming token delta |

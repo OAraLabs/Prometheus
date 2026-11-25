@@ -1122,6 +1122,8 @@ class WebSocketBridge:
         dispatcher = getattr(self, "push_dispatcher", None)
         if dispatcher is not None and dispatcher.node_pub():
             caps.append("push_node_pub")
+        # GET /api/approvals/{request_id} exists (server.py): a client may fetch one request instead of the list.
+        caps.append("approval_by_id")
         caps.append("pause")          # PUT/DELETE /api/pause, `paused` on /api/status (engine/pause.py)
         caps.append("plans")          # subscription plans on /api/providers/keys (providers/plans.py)
         from prometheus.security.git_read import capability_ready
