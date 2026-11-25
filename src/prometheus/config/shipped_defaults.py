@@ -133,9 +133,13 @@ SHIPPED_MAX_TOOL_ITERATIONS_CLOUD: int = 500
 #: 223-call turn stopped here, at 200 rounds, first.
 #:
 #: Reaching it is a BUDGET stop, not a failure: the turn's work is kept and
-#: saved, and the next message continues from it (#774). 200 is the value the
-#: dataclass always had, so making it configurable changes nothing by itself.
-SHIPPED_MAX_TURNS: int = 200
+#: saved, and the next message continues from it (#774). It was 200, the value
+#: the dataclass always had, which meant a long turn ended on the round cap
+#: before the 500-call tool budget it was meant to match; it is 500 now.
+#: Like those tool budgets, THIS NUMBER IS NOT THE SAFETY MECHANISM: the loop's
+#: repetition self-halt (identical calls that return nothing new) is, and it is
+#: unchanged.
+SHIPPED_MAX_TURNS: int = 500
 
 # gateway.media.allowed_*_types — inbound MIME allowlists on the Telegram
 # surface, the one exposed to the public internet by design. Absent from a

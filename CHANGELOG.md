@@ -4,6 +4,8 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## Unreleased
 
+- Loop: the per-turn model-round ceiling (`model.max_turns`) is now 500, to match the 500-call tool budget; it was 200, so a long turn ended on the round cap first (a 223-call turn did, on 2026-10-13). Reaching it is still a budget stop that keeps the turn's work. The repetition self-halt is unchanged and is still the real safety stop. A config that sets `model.max_turns` keeps its value (a config copied from the shipped template since 0.9.10 has `max_turns: 200` written in it, and `oara doctor` and the boot log say it overrides the shipped default: delete the line to follow the new default).
+
 ## 0.9.24 (2026-11-25)
 
 - Voice, event envelope: `POST /api/speech/event` is one door for every voice front end: `wake` (with trailing audio), `ptt_start` and `ptt_end`. The body carries `event`, `node_id`, `audio_base64` (raw 16 kHz mono pcm16/f32 samples) and a descriptive `ts`. `ptt_start` answers at once, and a capture opened by one device cannot be closed by another (403). A silence gate runs before transcription, which goes through the same voice-box client as every other speech route; a box that is down answers `503 speech_unavailable`. `origin` is not a field: a body that carries one is refused as `origin_not_a_field`, because origin comes from the device's credential.

@@ -35,7 +35,7 @@ none either — the key is documented so its absence is visible.
 | `model.verify_thinking_suppression` | `warn` |
 | `model.max_tool_iterations` | `500` |
 | `model.max_tool_iterations_cloud` | `500` |
-| `model.max_turns` | `200` |
+| `model.max_turns` | `500` |
 | `compaction` | *(section)* |
 | `compaction.enabled` | `True` |
 | `compaction.max_summary_tokens` | `512` |
