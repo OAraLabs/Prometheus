@@ -2,7 +2,7 @@
 
 A fresh install answers on the same port the configured daemon will, from a different application
 (``web/setup_server.py``), so a client must not need to know which one it reached: the same function builds
-the same six fields. What differs, and is pinned: ``pair`` is ``code`` (the six-digit code and the same-Mac
+the same seven fields. What differs, and is pinned: ``pair`` is ``code`` (the six-digit code and the same-Mac
 secret are what work), ``fp`` is empty (setup mode creates no ``~/.prometheus`` state, and a key is state),
 and the ``Origin`` refusal lives in the route, because this app has no bearer gate to do it.
 """
@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from prometheus.web.server import create_app  # noqa: E402
 from prometheus.web.setup_server import PairingState, create_setup_app  # noqa: E402
 
-SIX = {"v", "name", "agent", "fp", "pair", "tls"}
+SIX = {"v", "name", "agent", "fp", "pair", "tls", "ic"}   # seven since the v2 identity challenge
 
 
 @pytest.fixture(autouse=True)
@@ -33,7 +33,7 @@ def _client(**kwargs):
     return TestClient(app, **kwargs)
 
 
-def test_it_answers_in_setup_mode_with_the_same_six_fields():
+def test_it_answers_in_setup_mode_with_the_same_seven_fields():
     reply = _client().get("/api/hello")
     assert reply.status_code == 200, reply.text
     assert set(reply.json()) == SIX
@@ -44,6 +44,7 @@ def test_setup_mode_says_the_code_works_and_has_no_fingerprint():
     assert body["pair"] == "code"
     assert body["fp"] == ""
     assert body["tls"] is False
+    assert body["ic"] == 0, "setup mode has no identity-challenge route"
     assert body["agent"] == "Prometheus"
 
 

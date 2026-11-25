@@ -30,6 +30,7 @@ from prometheus.version import package_version
 from prometheus.web.bind import DEFAULT_BIND
 from prometheus.web.loopback import is_loopback_address, is_loopback_host_header
 from prometheus.web.session_scope import Scope, SessionAccess, event_session_id, scope_for, session_exists
+from prometheus.utils.file_extract import attachment_note, image_block, upload_block
 
 logger = logging.getLogger(__name__)
 
@@ -280,6 +281,9 @@ class WebSocketBridge:
         # feeds it agent_progress pulses and chat_done (Live Activity source);
         # bus signals reach it via its own subscription.
         self.push_dispatcher: Any | None = None
+        # Each is handed every frame broadcast() is given, first thing (the speech route's reply holder; the launcher
+        # registers it). An observer is synchronous and must not block.
+        self.frame_observers: list[Any] = []
         # GRAFT Piece 4: per-socket session filter. Absent / empty set = the
         # firehose (today's behaviour); a set = turn frames for those sessions
         # only. Replaced whole on every subscribe, cleaned up with the socket.
@@ -304,6 +308,9 @@ class WebSocketBridge:
         # stoppable. _interrupted marks a cancel as a DELIBERATE user stop —
         # any unflagged CancelledError (daemon shutdown) keeps propagating.
         self._turn_tasks: dict[str, asyncio.Task] = {}
+        # The running turn per session as the job watcher reads it (push/job_activity.py, Piece 18): when it
+        # started and its live progress dict. Registered and dropped beside _turn_tasks.
+        self._turn_progress: dict[str, tuple[float, dict[str, Any]]] = {}
         self._interrupted: set[str] = set()
         # Per-session turn serialization (fix: duplicate LCM rows, 2026-08-11
         # survey). The REAL lock lives on the shared SessionManager
@@ -425,6 +432,41 @@ class WebSocketBridge:
         raw = json.dumps(event)
         sent = 0
         for ws in self.operator_sockets():
+            try:
+                await ws.send(raw)
+                sent += 1
+            except Exception as exc:
+                self._frames_dropped += 1
+                self._clients.discard(ws)
+                self._clients_discarded += 1
+                logger.warning("WS frame DROPPED for client %s (type=%s): %s: %s",
+                               _client_label(ws), event.get("type", "?"), type(exc).__name__, exc)
+        return sent
+
+    def operator_sockets_watching(self, session_id: str) -> list[Any]:
+        """Operator sockets that would be sent a frame about *session_id*: no subscribe filter (the firehose, the
+        default) or a filter that names it."""
+        out = []
+        for ws in self.operator_sockets():
+            sessions = self._ws_filters.get(ws)
+            if not sessions or session_id in sessions:
+                out.append(ws)
+        return out
+
+    def operator_watched_sessions(self) -> set[str]:
+        """Sessions an operator socket names in its subscribe filter (a socket with no filter watches everything and
+        names none)."""
+        names: set[str] = set()
+        for ws in self.operator_sockets():
+            names |= set(self._ws_filters.get(ws) or ())
+        return names
+
+    async def send_to_operators_watching(self, event: dict[str, Any], session_id: str) -> int:
+        """Send *event* to the operator sockets watching *session_id* and no one else. Not the SignalBus: nothing
+        about it is durable or replayed. Returns how many took it; a send that fails drops that socket."""
+        raw = json.dumps(event)
+        sent = 0
+        for ws in self.operator_sockets_watching(session_id):
             try:
                 await ws.send(raw)
                 sent += 1
@@ -979,10 +1021,7 @@ class WebSocketBridge:
                     "upload: %s was not cached — carrying it as a note only",
                     filename,
                 )
-                note = (
-                    f"[The user uploaded an image, {filename}; it could not be "
-                    f"stored for analysis]"
-                )
+                note = attachment_note(f"The user uploaded an image, {filename}; it could not be stored for analysis")
                 if caption:
                     note = f"{note}\n{caption}"
                 await self._handle_send_message(session_id, note, **({} if operator else {"operator": False}))
@@ -1007,7 +1046,7 @@ class WebSocketBridge:
                     # screenshot?" with nothing naming a screenshot. The image is
                     # on the turn either way — this is about the row a human (or a
                     # later turn, or search) reads back.
-                    user_text = f"[Image: {filename}]"
+                    user_text = image_block(filename)
                     if caption:
                         user_text = f"{user_text}\n{caption}"
                     logger.info(
@@ -1026,9 +1065,9 @@ class WebSocketBridge:
 
             desc = await self._describe_image(cached_path)
             if desc:
-                user_text = f"[Image: {desc}]"
+                user_text = image_block(desc)
             else:
-                user_text = f"[The user sent an image: {filename}]"
+                user_text = attachment_note(f"The user sent an image: {filename}")
             if caption:
                 user_text = f"{user_text}\n{caption}"
         else:
@@ -1055,9 +1094,8 @@ class WebSocketBridge:
                     "upload: %s was not cached — carrying it as a note only",
                     filename,
                 )
-                note = (
-                    f"[The user uploaded {filename}; it could not be stored, so "
-                    f"its content was not extracted]"
+                note = attachment_note(
+                    f"The user uploaded {filename}; it could not be stored, so its content was not extracted"
                 )
                 if caption:
                     note = f"{caption}\n\n{note}"
@@ -1065,11 +1103,11 @@ class WebSocketBridge:
                 return
             extracted = extract_text(cached_path)
             if extracted:
-                user_text = f"[Content of {filename}]:\n{extracted}"
+                user_text = upload_block(filename, extracted)
                 if caption:
                     user_text = f"{caption}\n\n{user_text}"
             else:
-                user_text = caption or f"[The user sent a document: {filename}]"
+                user_text = caption or attachment_note(f"The user sent a document: {filename}")
 
         # Dispatch as a user message (same as _handle_send_message)
         await self._handle_send_message(session_id, user_text, **({} if operator else {"operator": False}))
@@ -1077,8 +1115,32 @@ class WebSocketBridge:
     def _server_capabilities(self) -> list[str]:
         """What the ``subscribed`` ack tells a client this daemon can do (see the ack)."""
         from prometheus.gateway import media_services
+        from prometheus.speech.voice import speech_configured
 
-        return ["voice_input"] if media_services.voice_input_available(self.config) else []
+        caps = ["voice_input"] if media_services.voice_input_available(self.config) else []
+        caps += ["speech"] if speech_configured(self.config) else []
+        # Pushes carry this node's public key (push/dispatcher.py), so a client paired with several Prometheus
+        # instances knows which sent one. Listed only when true: push is on and the node has a key. A daemon
+        # without it does not send the field, and a client must not wait for it.
+        dispatcher = getattr(self, "push_dispatcher", None)
+        if dispatcher is not None and dispatcher.node_pub():
+            caps.append("push_node_pub")
+        # GET /api/approvals/{request_id} exists (server.py): a client may fetch one request instead of the list.
+        caps.append("approval_by_id")
+        # Push is on, so the job watcher runs (launcher.py): the daemon takes a push-to-start token and starts
+        # JobActivityAttributes Live Activities for long jobs (push/job_activity.py).
+        if dispatcher is not None:
+            caps.append("job_activities")
+        caps.append("pause")          # PUT/DELETE /api/pause, `paused` on /api/status (engine/pause.py)
+        caps.append("plans")          # subscription plans on /api/providers/keys (providers/plans.py)
+        from prometheus.security.git_read import capability_ready
+
+        if capability_ready():        # GET /api/sessions/{id}/git: only where the startup self-test proved the floor
+            caps.append("git/1")
+        # Every serialized approval request says whether it must be answered in the app (permissions/critical.py),
+        # so a client can tell a missing ``critical`` (an older daemon) from ``false``.
+        caps.append("approval_critical")
+        return [*caps, "projects"]  # chat projects (web/chat_projects_routes.py): always served
 
     async def _system_note(self, session_id: str, content: str) -> None:
         await self.broadcast({
@@ -1129,7 +1191,7 @@ class WebSocketBridge:
         cached_path = cache_audio_from_bytes(data, ext=ext)
         if cached_path is None:
             logger.warning("upload: %s was not cached — carrying it as a note only", filename)
-            text = f"[The user sent a voice message, {filename}; it could not be stored, so it was not transcribed]"
+            text = attachment_note(f"The user sent a voice message, {filename}; it could not be stored, so it was not transcribed")
         else:
             notices: list[str] = []
             transcript = await media_services.transcribe_audio(cached_path, config=self.config, notices=notices)
@@ -1139,7 +1201,7 @@ class WebSocketBridge:
             if transcript:
                 text = f"[Voice message, transcribed]\n{transcript}"
             else:
-                text = f"[The user sent a voice message, {filename}; it could not be transcribed]"
+                text = attachment_note(f"The user sent a voice message, {filename}; it could not be transcribed")
         if caption:
             text = f"{text}\n{caption}"
         await self._handle_send_message(session_id, text, **({} if operator else {"operator": False}))
@@ -1178,9 +1240,16 @@ class WebSocketBridge:
         No try/except here on purpose: ``describe_image`` owns the failure
         policy for all three surfaces, so a bug fixed there is fixed once.
         """
+        from prometheus.gateway.media_cache import cached_image
         from prometheus.gateway.media_services import describe_image
 
-        return await describe_image(image_path, provider=self._get_provider())
+        # Only a picture the bridge stored itself (GHSA-v65x-3634-7pcm): never a path from anywhere else on the
+        # machine. The same root GET /api/media serves from.
+        resolved = cached_image(image_path)
+        if resolved is None:
+            logger.warning("upload: refused to describe %r, which is outside the media cache", image_path)
+            return None
+        return await describe_image(str(resolved), provider=self._get_provider())
 
     def _get_provider(self):
         """The model provider for vision analysis, off the loop context.
@@ -1240,7 +1309,7 @@ class WebSocketBridge:
             )
         return await self.reference_resolver.resolve(session_id, refs)
 
-    async def run_turn_awaited(self, session_id: str, content: str) -> tuple[str, Any]:
+    async def run_turn_awaited(self, session_id: str, content: str, *, author: str | None = None) -> tuple[str, Any]:
         """Run ONE agent turn in ``session_id`` and await its completion.
 
         Machine-caller counterpart to ``dispatch_user_message`` (which is
@@ -1270,7 +1339,9 @@ class WebSocketBridge:
         if hasattr(self.session_mgr, "rehydrate_if_cold"):
             self.session_mgr.rehydrate_if_cold(session_id)
         session = self.session_mgr.get_or_create(session_id)
-        turn_index = session.add_user_message(content)
+        # *author* names a caller that is not the owner (the Paperclip gateway: engine.messages.NOT_THE_OWNER), so
+        # its prompt teaches nothing.
+        turn_index = session.add_user_message(content, **({"author": author} if author else {}))
         row_id = session.last_persisted_row_id()
         ts = time.time()
         await self.broadcast({
@@ -1333,6 +1404,13 @@ class WebSocketBridge:
         })
         text, _usage = await self._run_agent(session_id, session, raise_on_error=True)
         return text
+
+    def running_turns(self) -> list[tuple[str, float, dict[str, Any]]]:
+        """``(session_id, started_at, progress)`` for every turn running now: what the job watcher reads
+        (push/job_activity.py). ``progress`` is a copy of the turn's live shape (phase, tool name, round, chars,
+        tool calls); the tool's inputs are never in it."""
+        return [(session_id, started_at, dict(progress))
+                for session_id, (started_at, progress) in list(self._turn_progress.items())]
 
     def interrupt_turn(self, session_id: str) -> bool:
         """Stop the running agent turn in ``session_id`` (the chat Stop button).
@@ -1418,10 +1496,19 @@ class WebSocketBridge:
         CommandHandler): it's handled here and broadcast back, NOT added to the
         session or run through the agent. See prometheus.web.slash_router.
 
-        If the content contains [Image: /path/to/file] references (from Beacon
-        dashboard uploads), run vision analysis to describe the image before
-        passing to the agent — matching the Telegram gateway's flow.
+        Text is never read as a reference to a file: an image reaches the turn only as an attachment the bridge
+        received and stored (``chat_upload``), never because a message names a path.
         """
+        # Paused (engine/pause.py): a message starts no turn and is not kept to run on resume, and no slash command
+        # runs either (some start model work, such as /compact). Reads go through REST.
+        from prometheus.engine import pause as _pause
+
+        if (_paused := _pause.current()) is not None:
+            await self.broadcast({"type": "error", "timestamp": time.time(), "payload": {
+                "session_id": session_id, "client_msg_id": client_msg_id, "kind": "paused",
+                "message": "Prometheus is paused; nothing new runs until a person resumes it.",
+                "since": _paused.since}})
+            return
         # Slash commands first — they never become conversation turns. Resolve
         # the active session (non-creating) for /steer & friends, and pass a
         # get_or_create factory for /queue (which fires on a quiet chat).
@@ -1470,27 +1557,10 @@ class WebSocketBridge:
         if not self.session_mgr:
             return
 
-        import re
-        # Detect image references from Beacon: [Image: /path/to/file.ext]
-        image_pattern = re.compile(r'\[Image:\s*(/[^\]]+)\]')
-        matches = image_pattern.findall(content)
-        if matches:
-            import os
-            described_parts = []
-            for img_path in matches:
-                if os.path.isfile(img_path):
-                    desc = await self._describe_image(img_path)
-                    if desc:
-                        described_parts.append(f"[Image: {desc}]")
-                    else:
-                        described_parts.append(f"[The user sent an image: {img_path}]")
-                else:
-                    described_parts.append(f"[Image reference: {img_path}]")
-            # Replace raw paths with descriptions
-            processed = content
-            for match, replacement in zip(matches, described_parts):
-                processed = processed.replace(f"[Image: {match}]", replacement, 1)
-            content = processed
+        # No text becomes a file read (GHSA-v65x-3634-7pcm). This used to search the whole message for
+        # "[Image: /path]" and describe whatever file it named: from a scoped device, from an uploaded document's
+        # text, from a vision description that began with "/". A picture is analysed only where the bridge received
+        # it as an attachment and stored it itself (_handle_file_upload).
 
         # feat/session-rehydrate — same cold-start restore as run_turn_awaited.
         if hasattr(self.session_mgr, "rehydrate_if_cold"):
@@ -1513,10 +1583,13 @@ class WebSocketBridge:
         # its next tick, so AutoDream pauses. Never raises.
         activity.note_user_activity()
         outcomes.note_user_message(session_id, content)
+        # A scoped device is not the owner: its message is marked as its own, so it teaches nothing.
+        from prometheus.engine.messages import SCOPED_DEVICE_AUTHOR
+        _author = {} if operator else {"author": SCOPED_DEVICE_AUTHOR}
         if blocks:
-            turn_index = session.add_user_message(content, blocks=blocks)
+            turn_index = session.add_user_message(content, blocks=blocks, **_author)
         else:
-            turn_index = session.add_user_message(content)
+            turn_index = session.add_user_message(content, **_author)
         row_id = session.last_persisted_row_id()
 
         # Record the correlation id against the durable rowid (audit P9.6 / Beacon#144). Both halves
@@ -1744,8 +1817,9 @@ class WebSocketBridge:
         # finally below so an idle stall reports "idle" rather than the last
         # turn's phase, which would be a stale annotation on a fresh spike.
         _loop_watchdog.publish_progress(progress)
+        turn_started_at = time.time()
         heartbeat = asyncio.create_task(
-            self._emit_progress(session_id, msg_id, progress, time.time())
+            self._emit_progress(session_id, msg_id, progress, turn_started_at)
         )
 
         _task = asyncio.current_task()
@@ -1767,6 +1841,7 @@ class WebSocketBridge:
                 # is not stoppable until it starts (stop it again then).
                 if _task is not None:
                     self._turn_tasks[session_id] = _task
+                self._turn_progress[session_id] = (turn_started_at, progress)
                 # Beacon #283: a compaction pass inside THIS turn reports here,
                 # and only here (a ContextVar: it follows this turn and no other).
                 from prometheus.context.compactor import COMPACTION_REPORTER
@@ -1798,6 +1873,8 @@ class WebSocketBridge:
             # with normal completion.
             if self._turn_tasks.get(session_id) is asyncio.current_task():
                 self._turn_tasks.pop(session_id, None)
+            if (self._turn_progress.get(session_id) or (None, None))[1] is progress:
+                self._turn_progress.pop(session_id, None)
             self._interrupted.discard(session_id)
             if self.agent_state_ref:
                 self.agent_state_ref["state"] = "idle"
@@ -2173,6 +2250,10 @@ class WebSocketBridge:
                     "hint": detail["hint"],
                 },
             })
+            # A failed turn ends its Live Activity too (Piece 18: the final state says how it ended). It used to be
+            # left showing its last update until it went stale.
+            await self._end_live_activity(session_id, {"session_id": session_id, "message_id": msg_id,
+                                                       "failed": True})
             if raise_on_error:
                 raise
             return accumulated, last_usage
@@ -2277,7 +2358,11 @@ class WebSocketBridge:
         if dispatcher is None:
             return
         try:
-            await dispatcher.on_chat_done(session_id, done_payload)
+            # Which turn ended: its start, so the job watcher remembers THIS turn (push/job_activity.py). A copy:
+            # the broadcast frame is unchanged.
+            started = (self._turn_progress.get(session_id) or (None, None))[0]
+            payload = {**done_payload, "turn_started_at": started} if started is not None else done_payload
+            await dispatcher.on_chat_done(session_id, payload)
         except Exception:
             logger.debug("live activity end push failed", exc_info=True)
 
@@ -2527,6 +2612,11 @@ class WebSocketBridge:
         undetected frames at the 3s progress cadence — not unbounded, but not
         zero either. See the PR body for what detecting it sooner would cost.
         """
+        for observe in getattr(self, "frame_observers", ()):
+            try:
+                observe(event)
+            except Exception:  # a raise here would roll the turn back
+                logger.warning("frame observer failed on %s", event.get("type", "?"), exc_info=True)
         if not self._clients:
             return
         raw = json.dumps(event)

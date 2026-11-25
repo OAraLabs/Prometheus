@@ -378,9 +378,17 @@ def _req_hosted(ev: Evidence) -> list[str]:
 
 
 def _req_memory(ev: Evidence) -> list[str]:
+    # Since 0.9.21 every memory change asks the owner, in every permission mode, and the queue that could ask is
+    # built only with the Telegram gateway. The harness runs none, so the change is refused at once and nothing is
+    # written: the trace records that refusal and the model's answer to it.
+    calls = [r for r in ev.tool_rows() if r.get("tool_name") == "memory"]
+    refused = [r for r in calls if r.get("error_type") == "permission_denied"]
     wrote = any(p.endswith("MEMORY.md") and "teal" in str(d) for p, d in ev.stores.items())
-    return (_need(wrote, "MEMORY.md does not hold the fact")
-            + _need(bool(_final_reply(ev).strip()), "no final reply"))
+    reply = _final_reply(ev).strip()
+    return (_need(bool(calls), "the model made no memory call")
+            + _need(len(refused) == len(calls), "a memory call was not refused for want of the owner's approval")
+            + _need(not wrote, "MEMORY.md holds the fact although no one approved it")
+            + _need(bool(reply), "no final reply"))
 
 
 def ws(name: str) -> str:
@@ -541,7 +549,8 @@ SCENARIOS: list[Scenario] = [
     ),
     Scenario(
         name="memory_write",
-        covers="the memory tool writing MEMORY.md (a memory write the diff can see)",
+        covers="a memory change asks the owner; with nothing that can answer (no Telegram gateway, so no "
+               "approval queue) it is refused and MEMORY.md stays untouched, and the model answers the refusal",
         steps=[{"op": "chat", "session": "desktop:parity-memory",
                 "message": "Please save this to your long-term memory with the memory "
                            "tool: the parity canary colour is teal. Confirm when done."}],

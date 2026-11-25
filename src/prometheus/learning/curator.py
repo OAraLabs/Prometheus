@@ -376,7 +376,10 @@ class Curator:
             return
         while self._running:
             try:
-                if self._state_store.curator().paused:
+                from prometheus.engine import pause as _pause
+
+                # The curator's own pause, or everything paused (engine/pause.py): skipped, not failed.
+                if self._state_store.curator().paused or _pause.current() is not None:
                     log.debug("Curator: paused, skipping tick")
                     # A pause is intentional — don't count as a failure or
                     # back off; just record a skipped row for liveness.
@@ -541,6 +544,13 @@ class Curator:
             except Exception as exc:
                 log.exception("Curator: LLM review failed")
                 run.errors.append(f"LLM review failed: {exc!s}")
+
+        # Paused while the model reviewed (engine/pause.py): nothing is moved. The suggestions come again next run.
+        from prometheus.engine import pause as _pause
+
+        if run.prunings and _pause.current() is not None:
+            log.info("Curator: Prometheus was paused during the review; archiving nothing")
+            run.prunings = []
 
         # Apply prunings (move to .archive/, never delete).
         if run.prunings and not dry_run:

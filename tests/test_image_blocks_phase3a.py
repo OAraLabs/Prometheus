@@ -54,8 +54,12 @@ def test_it_round_trips_back_into_a_message(tmp_path):
     assert block.data == "" and block.source_path == str(src)
 
 
-def test_rehydrate_refills_the_bytes_from_disk(tmp_path):
-    src = tmp_path / "shot.png"
+def test_rehydrate_refills_the_bytes_from_disk(tmp_path, monkeypatch):
+    # In the media cache, where an upload is stored: nothing else is read back (GHSA-v65x-3634-7pcm).
+    monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(tmp_path / "config"))
+    from prometheus.gateway.media_cache import image_cache_dir
+
+    src = image_cache_dir() / "shot.png"
     raw = base64.b64decode(PNG)
     src.write_bytes(raw)
     stored = ConversationMessage(

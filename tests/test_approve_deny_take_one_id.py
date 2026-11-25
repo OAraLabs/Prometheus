@@ -1,10 +1,9 @@
 """The approve and deny routes take ONE request id, and nothing else (Will, 2026-11-13).
 
 ``POST /api/approvals/{request_id}/approve`` built its chat-command text from the path segment, so the "id" ``all``
-answered every pending request at once. A push is unauthenticated: a notification carrying ``all`` as its request
-id would turn one tap on Approve into approving everything. Now any path segment that is not an id the queues mint
-(8 lowercase hex, ``approval_queue.new_request_id``) is a 404, before anything reads it, on approve and on deny.
-Approving several requests at once is not offered over REST.
+answered every pending request at once. A client acts on exactly the request it shows: now any path segment that is
+not an id the queues mint (8 lowercase hex, ``approval_queue.new_request_id``) is a 404, before anything reads it, on
+approve and on deny. Approving several requests at once is a chat command (``/approve all``), not offered over REST.
 """
 
 from __future__ import annotations

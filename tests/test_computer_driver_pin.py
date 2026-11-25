@@ -1,11 +1,13 @@
 """D12: the ``computer`` extra pins ``cua-driver`` EXACTLY.
 
-``>=0.28,<1`` admitted 0.28.3 and every release after it, and from 0.28.3
-``GetWindowStateInput`` has a REQUIRED keyword (``max_image_dimension``) our
-observe call does not pass — so every observation on such an install raises.
-Only ``uv.lock`` stood between a fresh install and a driver that can never
-observe; ``pip install 'oara-prometheus[computer]'``, the remedy
-``computer/cua.py`` itself prints, ignores the lock and resolved 0.33.1.
+A release on the same minor line can change the SDK's types: 0.28.3 made
+``GetWindowStateInput`` take a REQUIRED ``max_image_dimension`` and gave
+``ActionResult`` ``summary`` and ``error``, and an adapter written for 0.28.2
+raised on every observation there. ``pip install 'oara-prometheus[computer]'``,
+the remedy ``computer/cua.py`` itself prints, ignores the lock, so only the
+exact pin keeps a fresh install on the version the adapter was written for.
+The pin moved 0.28.2 -> 0.28.3 on 2026-11-13 (0.28.2 left PyPI), with the
+adapter adapted.
 
 An upgrade is a deliberate act: bump the pin, re-run the translation tests
 against the new wheel (``tests/test_cua_adapter.py``'s real-SDK section) and
@@ -20,7 +22,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-PINNED = "0.28.2"
+PINNED = "0.28.3"
 
 
 def test_the_computer_extra_pins_the_driver_exactly():

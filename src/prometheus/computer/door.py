@@ -66,6 +66,13 @@ class ComputerUseOff(DoorRefused):
     code = "computer_use_off"
 
 
+class AgentPaused(DoorRefused):
+    """Raised by ``ComputerTaskRunner.start`` while everything is paused (engine/pause.py), for every door."""
+
+    status = 423
+    code = "paused"
+
+
 class IntegrationDown(DoorRefused):
     status = 503
     code = "integration_down"

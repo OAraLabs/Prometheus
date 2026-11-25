@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import re
 import threading
 from pathlib import Path
 
@@ -38,6 +39,56 @@ UNSUPPORTED_MSG = (
     "Supported formats: txt, md, csv, json, yaml, py, pdf, docx, xlsx "
     "(and other common text/code files)."
 )
+
+
+# What a gateway puts in the sender's message that the sender did not type: an uploaded document's extracted text,
+# a vision model's description of a picture or sticker, and its own notes about an attachment ("[The user sent a
+# document: <name>]"). One shape each, built here, because the memory extractor takes them back out: none of it is
+# something the owner said (memory/extractor.py). What goes inside a bracket is escaped (a backslash before every
+# backslash and "]") and kept to one line, so a description or a file name chosen by someone else cannot end its
+# block early or start another.
+_INSIDE = r"(?:\\.|[^\]\\\n])*"
+_UPLOAD_HEADER_RE = re.compile(rf"^\[Content of {_INSIDE}\]:$", re.MULTILINE)
+_INLINE_RE = re.compile(rf"\[(?:Image: |The user sent|The user uploaded){_INSIDE}\]")
+
+
+def escape_inline(text: str) -> str:
+    """*text* for inside an inline block: one line, with ``\\`` and ``]`` escaped."""
+    return " ".join(text.split()).replace("\\", "\\\\").replace("]", "\\]")
+
+
+def upload_block(filename: str, text: str) -> str:
+    """The inline block for an uploaded document: a ``[Content of <filename>]:`` line, then its extracted *text*."""
+    return f"[Content of {escape_inline(filename)}]:\n{text}"
+
+
+def image_block(description: str) -> str:
+    """The inline marker for a picture: ``[Image: <description>]``."""
+    return f"[Image: {escape_inline(description)}]"
+
+
+def attachment_note(text: str) -> str:
+    """A gateway's note about an attachment, ``[<text>]``; *text* starts "The user sent" or "The user uploaded"."""
+    return f"[{escape_inline(text)}]"
+
+
+def is_upload_block(text: str) -> bool:
+    """Does *text* start with an upload block?"""
+    return _UPLOAD_HEADER_RE.match(text) is not None
+
+
+def owner_words(text: str) -> tuple[str, bool]:
+    """The words the sender typed in *text*, and whether anything else was taken out.
+
+    An upload block runs to the end of the message, because a document's text has no end marker: every gateway
+    writes the caption first and documents last. The header is found first, so nothing in the document reaches the
+    rest of the check; then picture and sticker descriptions and attachment notes are removed from what is left.
+    Text that merely contains ``[Content of`` mid-line is not a block.
+    """
+    header = _UPLOAD_HEADER_RE.search(text)
+    head = text if header is None else text[: header.start()]
+    words, inline = _INLINE_RE.subn("", head)
+    return words.strip(), bool(inline) or header is not None
 
 
 def extract_text(filepath: str, mime_type: str | None = None) -> str | None:

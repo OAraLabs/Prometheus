@@ -1894,7 +1894,7 @@ Each is labelled **decided (recommendation), revisit if you disagree**.
 | **D2: typing goes to focus** | `set_value` by element token through `call_tool` (RFC 4268's rule; `_native.py:5561`), else withhold `type-N`. The prompt never names a field the driver will not target. | PR 3 |
 | **Who picked the element** | Logged (`chooser.name`), never an extent term. | PR 3 |
 | **The computer approval channel** | A computer-only `ApprovalQueue` instance, so other tools are unaffected and the operator's `security.approval_queue.enabled` keeps its meaning. | PR 5 |
-| **`/approve all`** | Skips computer entries, on chat and REST, and says how many it skipped. | PR 5 |
+| **`/approve all`** | Skips computer entries on chat and says how many it skipped. (REST takes one request id only since 2026-11-13: no `all` there.) | PR 5 |
 | **Old iOS builds** | A payload-bearing computer approval from an iOS device without the capability header gets 409 "open on desktop or Telegram". | PR 5-6 |
 | **Binding persistence** | In memory; re-asked after a daemon restart. A durable binding is a follow-up. | PR 5 |
 | **Where the chooser runs** | A dedicated small-Gemma llama-server (E4B first), not the production slot. | PR 10 |

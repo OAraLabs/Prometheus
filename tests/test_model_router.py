@@ -1235,9 +1235,10 @@ class TestModelChoices:
             PRESET_MODEL_CHOICES,
         )
         default = OVERRIDE_PRESETS["qwen"]["model"]
-        cfg = {"slash_commands": {"qwen": {"models": ["qwen4-max", "qwen4-flash"]}}}
+        # Names no built-in list carries (qwen4-max became a real one on 2026-11-23).
+        cfg = {"slash_commands": {"qwen": {"models": ["qwen5-max", "qwen5-flash"]}}}
         choices = resolve_model_choices("qwen", cfg)
-        assert choices == (default, "qwen4-max", "qwen4-flash")
+        assert choices == (default, "qwen5-max", "qwen5-flash")
         # REPLACED, not merged — assert against the built-in list itself rather
         # than one name plucked out of it, so this keeps holding as that list moves.
         assert not (set(PRESET_MODEL_CHOICES["qwen"]) - {default}) & set(choices)

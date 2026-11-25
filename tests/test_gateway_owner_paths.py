@@ -327,7 +327,8 @@ async def test_no_assistant_reply_in_a_group_session_is_mined(tmp_path):
     assert _OWNER_MARKER in prompts, "control: the owner's line in the group is mined"
     assert _MEMBER_MARKER not in prompts, "a member's words, or a reply repeating them, were mined"
     assert "GROUP_REPLY_TO_THE_OWNER" not in prompts, "an assistant reply in a group session was mined"
-    assert "PRIVATE_REPLY_IS_MINED" in prompts, "control: a private session's replies are mined as before"
+    # GHSA-f68r-xfv4-83fr: no assistant reply is mined anywhere now, a private session's included.
+    assert "PRIVATE_REPLY_IS_MINED" not in prompts, "an assistant reply in a private session was mined"
 
 
 # --------------------------------------------------------------------------- #

@@ -149,4 +149,6 @@ def test_a_route_key_the_config_names_is_kept_but_never_a_daemon_token(tmp_path)
     env = task_child_env(config_path=str(config), base={
         "PATH": "/usr/bin", "GEMMA_TUNNEL_KEY": "k", "PROMETHEUS_API_TOKEN": "t",
         "PROMETHEUS_DISCORD_TOKEN": "d", "PROMETHEUS_GITHUB_TOKEN": "g"})
+    # Every daemon-built child is also told the pause file (engine/pause.py, 2026-11-13); it is a path, no secret.
+    assert env.pop("PROMETHEUS_PAUSE_FILE").endswith("pause.json")
     assert env == {"PATH": "/usr/bin", "GEMMA_TUNNEL_KEY": "k"}

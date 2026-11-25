@@ -27,12 +27,6 @@
   "home/.prometheus/.daemon_started": {
    "replaced": "<boot-specific>"
   },
-  "home/.prometheus/MEMORY.md": {
-   "text": ""
-  },
-  "home/.prometheus/USER.md": {
-   "text": ""
-  },
   "home/.prometheus/checkpoints/checkpoints.db": {
    "sqlite": {
     "checkpoint_files": {
@@ -200,6 +194,32 @@
   },
   "home/.prometheus/data/lcm.db": {
    "sqlite": {
+    "chat_projects": {
+     "columns": [
+      "id",
+      "name",
+      "name_folded",
+      "folder",
+      "folder_managed",
+      "import_key",
+      "position",
+      "created_at",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "chat_projects_rev": {
+     "columns": [
+      "id",
+      "rev"
+     ],
+     "rows": [
+      [
+       1,
+       0
+      ]
+     ]
+    },
     "checkpoints": {
      "columns": [
       "id",
@@ -370,6 +390,14 @@
       "key",
       "set_by",
       "updated_at"
+     ],
+     "rows": []
+    },
+    "session_chat_projects": {
+     "columns": [
+      "session_id",
+      "project_id",
+      "filed_at"
      ],
      "rows": []
     },

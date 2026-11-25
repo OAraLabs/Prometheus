@@ -37,6 +37,8 @@ EXPECTED_SCOPED_ALLOWED = {
     ("DELETE", "/api/devices/{device_id}/push"),
     ("POST", "/api/devices/{device_id}/activity"),
     ("DELETE", "/api/devices/{device_id}/activity"),
+    ("PUT", "/api/devices/{device_id}/activity-start"),
+    ("DELETE", "/api/devices/{device_id}/activity-start"),
     # chat
     ("POST", "/api/chat"),
     ("POST", "/api/chat/send"),
@@ -53,13 +55,23 @@ EXPECTED_SCOPED_ALLOWED = {
     ("GET", "/api/events/recent"),
     ("GET", "/api/activity/recent"),
     ("POST", "/api/search"),
+    # chat projects: only those its own sessions are in, as id and name (the handlers filter)
+    ("GET", "/api/chat-projects"),
+    ("GET", "/api/chat-projects/{project_id}"),
+    # speech, with chat's limits: a session's reply only for a session it owns (the session path guard)
+    ("GET", "/api/speech"),
+    ("POST", "/api/speech/transcribe"),
+    ("POST", "/api/speech/speak"),
+    ("GET", "/api/sessions/{session_id}/speech"),
     # the one desktop route open to every valid token: a stop can only end a task
     ("POST", "/api/computer/tasks/{task_id}/stop"),
     # the tool calls of its own sessions: seen and denied; approving is the owner's (or a marked device's, for a
     # desktop prompt), enforced in the handler
     ("GET", "/api/approvals"),
+    ("GET", "/api/approvals/{request_id}"),
     ("POST", "/api/approvals/{request_id}/approve"),
     ("POST", "/api/approvals/{request_id}/deny"),
+    ("GET", "/api/pause"),                     # paused + since only (2026-11-13, phone item 4b)
 }
 
 
@@ -264,3 +276,13 @@ def test_a_marked_device_is_still_denied_everything_the_mark_does_not_cover(mark
                          ("GET", "/api/config"), ("POST", "/api/devices")):
         response = client.request(method, path, headers=headers, json={})
         assert response.status_code == 403 and response.json().get("error") == "operator_only", (method, path)
+
+
+def test_a_named_operator_route_beats_a_scoped_pattern_that_also_matches_it():
+    """``GET /api/approvals/{request_id}`` must not let a scoped device read ``GET /api/approvals/grants``: a
+    literal operator-only route wins over any placeholder pattern that would also match its path (review,
+    2026-11-12). Checked across the whole table, so the next placeholder route cannot reopen it."""
+    literal = {(m, p) for m, p in route_access.OPERATOR_ONLY if "{" not in p}
+    for method, path in sorted(literal):
+        assert route_access.is_scoped_allowed(method, path, marked=lambda: True) is False, (method, path)
+        assert route_access.is_scoped_allowed(method, path + "/", marked=lambda: True) is False, (method, path)

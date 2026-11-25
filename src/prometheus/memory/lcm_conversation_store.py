@@ -12,12 +12,16 @@ import sqlite3
 import time
 from collections.abc import Iterable
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from prometheus.config.paths import get_lcm_db_path
 from prometheus.memory.lcm_fts5 import sanitize_fts5_query
 from prometheus.memory.lcm_types import MessagePart
 from prometheus.security.log_redaction import redact_json_text, redact_secrets
+
+if TYPE_CHECKING:
+    from prometheus.projects.store import ChatProjectStore
 
 log = logging.getLogger(__name__)
 
@@ -256,6 +260,11 @@ class LCMConversationStore:
                 updated_at REAL NOT NULL
             );
         """)
+        # Chat projects (projects/store.py): made here, with the rest of the schema, so building the store later
+        # never commits mid-way through someone else's transaction.
+        from prometheus.projects.store import SCHEMA as _CHAT_PROJECTS_SCHEMA
+
+        self._conn.executescript(_CHAT_PROJECTS_SCHEMA)
         self._conn.commit()
         self._migrate_add_content_json()
         self._migrate_add_trust_fields()
@@ -1126,10 +1135,15 @@ class LCMConversationStore:
             #    here, not a silent survivor.
             for table in ("session_titles", "session_profiles", "session_pins",
                           "session_tombstones", "session_forks", "session_workspaces",
-                          "session_backends", "message_client_ids"):
+                          "session_backends", "message_client_ids", "session_chat_projects"):
                 counts[table] = self._conn.execute(
                     f"DELETE FROM {table} WHERE session_id = ?", (session_id,)
                 ).rowcount if self._table_exists(table) else 0
+            if counts.get("session_chat_projects"):
+                # A membership change: clients holding a chat-projects rev must see it moved.
+                from prometheus.projects.store import bump_rev
+
+                bump_rev(self._conn)
 
             # fts5's 'delete' unlinks a document but leaves the TERM in the
             # index b-tree with an empty doclist, and VACUUM preserves that —
@@ -1160,6 +1174,33 @@ class LCMConversationStore:
         self._conn.execute("VACUUM")
         self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return counts
+
+    def has_session_rows(self, session_id: str) -> bool:
+        """True when *session_id* has messages, or a workspace binding or chat-project filing made before its first
+        message: either way it exists, and no device may claim it (web/session_scope.session_exists)."""
+        if self.max_rowid(session_id) > 0:
+            return True
+        for table in ("session_workspaces", "session_chat_projects"):
+            if self._table_exists(table) and self._conn.execute(
+                    f"SELECT 1 FROM {table} WHERE session_id = ?", (session_id,)).fetchone():
+                return True
+        return False
+
+    def tool_use_json(self, session_id: str) -> list[str]:
+        """The ``content_json`` of each assistant row that holds a tool call, in order (chat-project suggestions)."""
+        return [r[0] for r in self._conn.execute(
+            "SELECT content_json FROM lcm_messages WHERE session_id = ? AND role = 'assistant'"
+            " AND content_json LIKE '%tool_use%' ORDER BY rowid", (session_id,)).fetchall()]
+
+    def chat_projects(self) -> ChatProjectStore:
+        """The chat projects store, on this connection (``projects/store.py``): filing a session changes its
+        membership and its workspace binding in one transaction. Made once, then kept."""
+        store = getattr(self, "_chat_projects", None)
+        if store is None:
+            from prometheus.projects.store import ChatProjectStore
+
+            store = self._chat_projects = ChatProjectStore(self._conn)
+        return store
 
     def _table_exists(self, name: str) -> bool:
         return bool(
@@ -1446,6 +1487,21 @@ class LCMConversationStore:
             (session_id, int(row_id), cid, time.time()),
         )
         self._conn.commit()
+
+    def has_message_client_id(self, session_id: str, client_msg_id: str | None) -> bool:
+        """Whether a message the client named ``client_msg_id`` is already stored in ``session_id``.
+
+        What lets ``POST /api/chat/send`` treat a retry as the same message after a restart, when its in-memory
+        record of ids it has accepted is gone. A blank id is never "seen".
+        """
+        cid = (client_msg_id or "").strip()
+        if not cid:
+            return False
+        row = self._conn.execute(
+            "SELECT 1 FROM message_client_ids WHERE session_id = ? AND client_msg_id = ? LIMIT 1",
+            (session_id, cid),
+        ).fetchone()
+        return row is not None
 
     def get_message_client_ids(self, session_id: str) -> dict[int, str]:
         """``row_id -> client_msg_id`` for a session, so a history read can return them.

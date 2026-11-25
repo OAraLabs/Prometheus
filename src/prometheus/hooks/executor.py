@@ -37,6 +37,7 @@ try:
 except (ImportError, AttributeError):
     _NETWORK_STREAM = _NETWORK_BACKEND = None
 
+from prometheus.engine import pause as _pause
 from prometheus.engine.messages import ConversationMessage
 from prometheus.hooks.events import HookEvent
 from prometheus.hooks.registry import HookRegistry
@@ -265,6 +266,11 @@ class HookExecutor:
         try:
             async with deadline:
                 return await self._ask_prompt_like_hook(hook, payload, agent_mode=agent_mode)
+        except _pause.Paused:
+            # Pause everything (engine/pause.py): no verdict can be asked, so the event is blocked whatever
+            # block_on_failure says (fail closed). Not a hook failure: no warning.
+            return HookResult(hook_type=hook.type, success=False, blocked=True,
+                              reason=f"{label}: not asked, Prometheus is paused")
         except Exception as exc:  # noqa: BLE001 — a hook failure must not look like a tool failure
             # Only OUR deadline is a timeout. A TimeoutError the provider
             # raised on its own is an error like any other.

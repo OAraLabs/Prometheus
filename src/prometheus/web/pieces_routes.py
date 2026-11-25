@@ -231,6 +231,12 @@ def register_pieces_routes(app: Any, *, devices: Callable[[], Any], auth_on: Cal
         uses = body.get("uses", offered)
         if not isinstance(uses, list) or not uses or any(use not in offered for use in uses):
             return _error(400, "invalid_request", f"uses must be some of what it offers: {', '.join(offered)}")
+        if secret:
+            from prometheus.config.env_file import env_value_problem
+
+            if not isinstance(secret, str) or len(secret) > 4096 or env_value_problem(secret):
+                # The env file is line-based: a line break of any kind in a key would start an assignment of its own.
+                return _error(400, "invalid_request", "secret must be one line with no control characters")
         if secret and piece.address_class not in joining.KEY_CLASSES:
             # Contract 5.2 rule 3: never to a LAN or public address.
             return _error(422, "secret_needs_proof",

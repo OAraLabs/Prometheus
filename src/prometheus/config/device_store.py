@@ -328,6 +328,27 @@ class DeviceStore:
                            push_failures=int(r["push_failures"] or 0))
                 for r in rows]
 
+    def quiet_push_targets(self, session_id: str | None) -> list[PushTarget]:
+        """The push targets a QUIET push (turn or task finished) may reach: live owner devices, and the live device
+        that owns *session_id*. Such a push carries a line of content (a turn's is the first line of the reply), so a
+        scoped device hears only about its own sessions. No session: owners only."""
+        allowed = set(self.owner_device_ids())
+        if session_id:
+            owner = self.session_owner(session_id)
+            if owner:
+                allowed.add(owner)
+        return [t for t in self.push_targets() if t.id in allowed]
+
+    def approval_push_targets(self, *, desktop: bool) -> list[PushTarget]:
+        """The push targets an APPROVAL push may reach: live owner devices, and, for a desktop prompt (whose push
+        carries no content at all), also the live devices marked for computer use, which are the ones that may
+        answer it. A scoped device approves nothing but a desktop prompt, so a push naming another session's tool
+        and action must not reach it."""
+        allowed = set(self.owner_device_ids())
+        if desktop:
+            allowed |= self.computer_device_ids()
+        return [t for t in self.push_targets() if t.id in allowed]
+
     # ------------------------------------------------------------------
     # Live Activity tokens (GRAFT Piece 2)
     # ------------------------------------------------------------------
@@ -348,17 +369,160 @@ class DeviceStore:
         self._conn.commit()
 
     def activity_targets(self, session_id: str) -> list[tuple[PushTarget, str]]:
-        """(push target, activity_token) pairs for a session's live activities.
-        Joined on live push-registered devices: a revoked or push-cleared
-        device's activity token is unreachable and simply drops out."""
+        """(push target, activity_token) pairs for a session's live activities, on LIVE devices: a revoked
+        device's activity token drops out. NOT joined on an alert registration (Piece 18 review): the activity token
+        is its own APNs address, and Live Activities need no notification permission, so a phone that declined
+        notifications still gets its activity's updates and end. The environment is then ``production`` and the
+        topic the sender's own."""
         rows = self._conn.execute(
             "SELECT d.id, d.apns_token, d.apns_environment, d.apns_bundle_id,"
             "       d.push_failures, a.activity_token"
             "  FROM activity_tokens a JOIN api_devices d ON d.id = a.device_id"
-            " WHERE a.session_id = ? AND d.revoked_at IS NULL AND d.apns_token IS NOT NULL",
+            " WHERE a.session_id = ? AND d.revoked_at IS NULL",
             (session_id,),
         ).fetchall()
-        return [(PushTarget(id=r["id"], apns_token=r["apns_token"],
+        return [(PushTarget(id=r["id"], apns_token=r["apns_token"] or "",
+                            environment=r["apns_environment"] or "production",
+                            bundle_id=r["apns_bundle_id"] or "",
+                            push_failures=int(r["push_failures"] or 0)),
+                 r["activity_token"]) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Live Activities the DAEMON starts (Beacon iOS "Piece 18")
+    # ------------------------------------------------------------------
+    #
+    # Two tables, each created on the FIRST write rather than at open, like computer_devices below: a daemon whose
+    # phones never register for one keeps its schema, and the parity fixtures, which record every table in this
+    # file, stay as they are. Reads treat a missing table as empty.
+    #
+    #   activity_start_tokens  one push-to-start token per device (iOS 17.2): what lets the daemon start a Live
+    #                          Activity on a phone for a job the phone did not start.
+    #   job_activity_tokens    an activity's update token for a task, a coding run or a desktop task, keyed by
+    #                          (device, kind, job id). A turn's stays in activity_tokens, keyed by session id, so a
+    #                          turn in session ``coding:c1`` and coding run ``c1`` can never share a row.
+    #
+    # Neither token is ever on DeviceRow: GET /api/devices must not list them.
+
+    def _has_table(self, name: str) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+
+    def set_activity_start_token(self, device_id: str, token: str) -> bool:
+        """Register (or replace) a LIVE device's push-to-start token. False for an unknown or revoked device."""
+        live = self._conn.execute(
+            "SELECT 1 FROM api_devices WHERE id = ? AND revoked_at IS NULL", (device_id,)).fetchone()
+        if live is None:
+            return False
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS activity_start_tokens (
+              device_id  TEXT PRIMARY KEY,
+              token      TEXT NOT NULL,
+              updated_at REAL NOT NULL
+            );
+        """)
+        self._conn.execute(
+            "INSERT OR REPLACE INTO activity_start_tokens (device_id, token, updated_at) VALUES (?, ?, ?)",
+            (device_id, token, time.time()))
+        self._conn.commit()
+        return True
+
+    def clear_activity_start_token(self, device_id: str, token: str | None = None) -> bool:
+        """Drop a device's push-to-start token (or only *token*, when it is still the one stored: a 410 for an old
+        token must not drop the new one the phone registered meanwhile). True if the device exists at all."""
+        exists = self._conn.execute("SELECT 1 FROM api_devices WHERE id = ?", (device_id,)).fetchone()
+        if self._has_table("activity_start_tokens"):
+            if token is None:
+                self._conn.execute("DELETE FROM activity_start_tokens WHERE device_id = ?", (device_id,))
+            else:
+                self._conn.execute("DELETE FROM activity_start_tokens WHERE device_id = ? AND token = ?",
+                                   (device_id, token))
+            self._conn.commit()
+        return exists is not None
+
+    def activity_start_targets(self) -> list[tuple[PushTarget, str]]:
+        """(push target, push-to-start token) for every LIVE device that registered one.
+
+        The target's environment and bundle come from the device's push registration when it has one; a device
+        without one (Live Activities need no notification permission) is reached as ``production`` on the
+        sender's own topic."""
+        if not self._has_table("activity_start_tokens"):
+            return []
+        rows = self._conn.execute(
+            "SELECT d.id, d.apns_token, d.apns_environment, d.apns_bundle_id, d.push_failures, s.token"
+            "  FROM activity_start_tokens s JOIN api_devices d ON d.id = s.device_id"
+            " WHERE d.revoked_at IS NULL ORDER BY d.created_at").fetchall()
+        return [(PushTarget(id=r["id"], apns_token=r["apns_token"] or "",
+                            environment=r["apns_environment"] or "production",
+                            bundle_id=r["apns_bundle_id"] or "",
+                            push_failures=int(r["push_failures"] or 0)),
+                 r["token"]) for r in rows]
+
+    def set_job_activity_token(self, device_id: str, kind: str, job_id: str, token: str) -> None:
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS job_activity_tokens (
+              device_id      TEXT NOT NULL,
+              kind           TEXT NOT NULL,
+              job_id         TEXT NOT NULL,
+              activity_token TEXT NOT NULL,
+              updated_at     REAL NOT NULL,
+              PRIMARY KEY (device_id, kind, job_id)
+            );
+        """)
+        self._conn.execute(
+            "INSERT OR REPLACE INTO job_activity_tokens (device_id, kind, job_id, activity_token, updated_at)"
+            " VALUES (?, ?, ?, ?, ?)", (device_id, kind, job_id, token, time.time()))
+        self._conn.commit()
+
+    def clear_job_activity_token(self, device_id: str, kind: str, job_id: str) -> None:
+        if not self._has_table("job_activity_tokens"):
+            return
+        self._conn.execute("DELETE FROM job_activity_tokens WHERE device_id = ? AND kind = ? AND job_id = ?",
+                           (device_id, kind, job_id))
+        self._conn.commit()
+
+    def clear_job_activity_tokens(self, kind: str, job_id: str) -> None:
+        """Drop every device's token for one job (it ended)."""
+        if not self._has_table("job_activity_tokens"):
+            return
+        self._conn.execute("DELETE FROM job_activity_tokens WHERE kind = ? AND job_id = ?", (kind, job_id))
+        self._conn.commit()
+
+    def push_target(self, device_id: str) -> PushTarget | None:
+        """One LIVE device as a push target (its alert token may be empty), or None."""
+        r = self._conn.execute(
+            "SELECT id, apns_token, apns_environment, apns_bundle_id, push_failures FROM api_devices"
+            " WHERE id = ? AND revoked_at IS NULL", (device_id,)).fetchone()
+        if r is None:
+            return None
+        return PushTarget(id=r["id"], apns_token=r["apns_token"] or "",
+                          environment=r["apns_environment"] or "production",
+                          bundle_id=r["apns_bundle_id"] or "", push_failures=int(r["push_failures"] or 0))
+
+    def all_job_activity_tokens(self) -> list[tuple[str, str, PushTarget, str]]:
+        """Every job token row on a live device, as (kind, job id, target, token): what the boot sweep ends."""
+        if not self._has_table("job_activity_tokens"):
+            return []
+        rows = self._conn.execute(
+            "SELECT j.kind, j.job_id, d.id, d.apns_token, d.apns_environment, d.apns_bundle_id, d.push_failures,"
+            "       j.activity_token"
+            "  FROM job_activity_tokens j JOIN api_devices d ON d.id = j.device_id"
+            " WHERE d.revoked_at IS NULL").fetchall()
+        return [(r["kind"], r["job_id"],
+                 PushTarget(id=r["id"], apns_token=r["apns_token"] or "",
+                            environment=r["apns_environment"] or "production",
+                            bundle_id=r["apns_bundle_id"] or "", push_failures=int(r["push_failures"] or 0)),
+                 r["activity_token"]) for r in rows]
+
+    def job_activity_targets(self, kind: str, job_id: str) -> list[tuple[PushTarget, str]]:
+        """(push target, activity token) for one job's live activities, on LIVE devices (a revoked device's token
+        drops out). Unlike a turn's, not joined on an alert registration: see :meth:`activity_start_targets`."""
+        if not self._has_table("job_activity_tokens"):
+            return []
+        rows = self._conn.execute(
+            "SELECT d.id, d.apns_token, d.apns_environment, d.apns_bundle_id, d.push_failures, j.activity_token"
+            "  FROM job_activity_tokens j JOIN api_devices d ON d.id = j.device_id"
+            " WHERE j.kind = ? AND j.job_id = ? AND d.revoked_at IS NULL", (kind, job_id)).fetchall()
+        return [(PushTarget(id=r["id"], apns_token=r["apns_token"] or "",
                             environment=r["apns_environment"] or "production",
                             bundle_id=r["apns_bundle_id"] or "",
                             push_failures=int(r["push_failures"] or 0)),
@@ -431,6 +595,65 @@ class DeviceStore:
         rows = self._conn.execute(
             "SELECT c.device_id FROM computer_devices c JOIN api_devices d "
             "ON d.id = c.device_id WHERE d.revoked_at IS NULL").fetchall()
+        return {r["device_id"] for r in rows}
+
+    # ------------------------------------------------------------------
+    # The PERSON mark: the one thing that lets a device resume a pause
+    # ------------------------------------------------------------------
+    #
+    # It does nothing else (engine/pause.py, web/pause_routes.py): not computer use, not approvals. Set and cleared
+    # only from the owner's Telegram (/person allow|disallow, gateway/commands.py cmd_person); no REST route sets
+    # it, so neither the API token nor a device can. Its own table, created on the FIRST mark like
+    # computer_devices, so a daemon that never marks one never grows it and the parity fixtures stay as they are.
+
+    def _has_person_table(self) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='person_devices'").fetchone() is not None
+
+    def set_person(self, device_id: str, on: bool, *, by: str) -> bool:
+        """Mark (or unmark) a LIVE device as a person's. False for an unknown or revoked id; ValueError for
+        marking a device held to a profile (a held device is a caller with limited reach, never a person)."""
+        live = self._conn.execute(
+            "SELECT 1 FROM api_devices WHERE id = ? AND revoked_at IS NULL", (device_id,)).fetchone()
+        if live is None:
+            return False
+        if on and self.device_profile(device_id):
+            raise ValueError(f"device {device_id} is held to profile {self.device_profile(device_id)!r}, and a "
+                             f"held device cannot be marked as a person's")
+        if not on:
+            if self._has_person_table():
+                self._conn.execute("DELETE FROM person_devices WHERE device_id = ?", (device_id,))
+                self._conn.commit()
+            return True
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS person_devices (
+              device_id  TEXT PRIMARY KEY,
+              marked_at  REAL NOT NULL,
+              marked_by  TEXT NOT NULL
+            );
+        """)
+        self._conn.execute(
+            "INSERT OR REPLACE INTO person_devices (device_id, marked_at, marked_by) VALUES (?, ?, ?)",
+            (device_id, time.time(), by))
+        self._conn.commit()
+        return True
+
+    def person_allowed(self, device_id: str) -> bool:
+        """Is this LIVE device marked as a person's? A revoked device never is, whatever its mark says."""
+        if not self._has_person_table():
+            return False
+        row = self._conn.execute(
+            "SELECT 1 FROM person_devices p JOIN api_devices d ON d.id = p.device_id "
+            "WHERE p.device_id = ? AND d.revoked_at IS NULL", (device_id,)).fetchone()
+        return row is not None
+
+    def person_device_ids(self) -> set[str]:
+        if not self._has_person_table():
+            return set()
+        rows = self._conn.execute(
+            "SELECT p.device_id FROM person_devices p JOIN api_devices d "
+            "ON d.id = p.device_id WHERE d.revoked_at IS NULL").fetchall()
         return {r["device_id"] for r in rows}
 
     # ------------------------------------------------------------------

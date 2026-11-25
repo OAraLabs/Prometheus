@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Callable
 
 from prometheus.memory.entity_validation import classify_entity, quarantine
 from prometheus.memory.store import EXTRACTOR_GLOBAL_SCOPE, MemoryStore
+from prometheus.utils.file_extract import owner_words
 
 if TYPE_CHECKING:
     from prometheus.providers.base import ModelProvider
@@ -143,20 +144,41 @@ def _near_dup_similarity(a: frozenset[str], b: frozenset[str]) -> float:
     return max(overlap / len(a | b), overlap / min(len(a), len(b)))
 
 
-def _is_member_turn(part: object) -> bool:
-    """A user row a group member who is not the owner wrote (gateway trust): provenance "member"."""
-    # By provenance only: tool-result rows are user-role and untrusted too, and are not a member's.
-    return getattr(part, "role", "") == "user" and (getattr(part, "provenance", "user") or "user") == "member"
-
-
-def _has_member_turns(conv_store: object, session_id: str) -> bool:
-    """Has a group member ever spoken in *session_id*? Read from the store, so an earlier batch counts too."""
-    check = getattr(conv_store, "has_member_turns", None)
+def _blocks(part: object) -> list[dict] | None:
+    """A row's structured blocks from ``content_json``, or None for a row written before it existed."""
+    raw = getattr(part, "content_json", None)
+    if not raw:
+        return None
     try:
-        return bool(check(session_id)) if callable(check) else False
-    except Exception:
-        log.debug("MemoryExtractor: member-turn check failed for %s", session_id, exc_info=True)
-        return True  # cannot tell: treat it as a group session and mine no assistant rows
+        blocks = json.loads(raw)
+    except ValueError:
+        return None
+    return [b for b in blocks if isinstance(b, dict)] if isinstance(blocks, list) else None
+
+
+def _owner_words(part: object) -> str:
+    """The words the owner typed in user row *part*, or "" when it is not the owner's own message.
+
+    The owner's own: role user, provenance "user", trusted, and not written by an author who isn't the owner
+    (``engine.messages.NOT_THE_OWNER``: a scoped device, the Paperclip gateway).
+    Of that message, only the owner's text blocks: not a composer reference (a block of its own) and not the upload,
+    picture and sticker text or attachment notes a gateway writes inline (``file_extract.owner_words``). A tool
+    result's row has no text block, so it yields "".
+    """
+    from prometheus.engine.messages import NOT_THE_OWNER
+    from prometheus.web.references import is_reference_block
+
+    if getattr(part, "role", "") != "user" or (getattr(part, "provenance", "user") or "user") != "user":
+        return ""
+    if not getattr(part, "is_trusted", True) or getattr(part, "author", None) in NOT_THE_OWNER:
+        return ""
+    blocks = _blocks(part)
+    if blocks is None:
+        text = getattr(part, "content", "") or ""
+    else:
+        text = "".join(str(b.get("text", "")) for b in blocks
+                       if b.get("type") == "text" and not is_reference_block(str(b.get("text", ""))))
+    return owner_words(text)[0]
 
 
 class MemoryExtractor:
@@ -292,32 +314,16 @@ class MemoryExtractor:
         # cursor; this applies it per row. See _drop_already_consumed.
         parts = self._drop_already_consumed(parts, session_id)
 
-        # TRUST-CONTEXT: only mine genuine conversation. Injected non-"user"
-        # provenance turns (task_supervisor job output now; cron / orchestrator
-        # later) are UNTRUSTED data, not statements by the user — they must
-        # never be extracted as user facts. Filter on the PERSISTED provenance
-        # column (durable as of the trust-tag plumbing); never re-derive trust
-        # from message text.
-        user_parts = [
-            part for part in parts
-            if (getattr(part, "provenance", "user") or "user") == "user"
-        ]
-        # GATEWAY TRUST (0.9.17): only the owner teaches. A user row that is not trusted is a group member's (or an
-        # injected turn's), whatever its provenance column says; and in a session where a member has spoken, the
-        # assistant's replies are not mined either, because they can repeat what the member said.
-        group_sessions = {part.session_id for part in parts if _is_member_turn(part)} | {
-            sid for sid in {part.session_id for part in parts}
-            if sid and _has_member_turns(conv_store, sid)
-        }
-        user_parts = [
-            part for part in user_parts
-            if not (getattr(part, "role", "") == "user" and not getattr(part, "is_trusted", True))
-            and not (getattr(part, "role", "") == "assistant" and part.session_id in group_sessions)
-        ]
-        skipped = len(parts) - len(user_parts)
+        # TRUST-CONTEXT: only the owner teaches, and only in their own words (GHSA-f68r-xfv4-83fr). Not an assistant
+        # reply: it can repeat a tool's result, an upload or a page the model read turns earlier. Not a tool result,
+        # an injected turn (task_supervisor job output, cron, orchestrator), a group member or a scoped device. Read
+        # from the PERSISTED provenance, trust and author columns; never re-derived from message text.
+        owner_parts = [(part, _owner_words(part)) for part in parts]
+        owner_parts = [(part, words) for part, words in owner_parts if words]
+        skipped = len(parts) - len(owner_parts)
         if skipped:
             log.debug(
-                "MemoryExtractor: skipped %d non-user-provenance message(s) — "
+                "MemoryExtractor: skipped %d message(s) that are not the owner's own words — "
                 "not mined into memory", skipped,
             )
 
@@ -325,10 +331,10 @@ class MemoryExtractor:
         # gym, smoke, "system"). Their fixture chatter is not knowledge about
         # the user — see _MACHINE_SESSION_PREFIXES.
         conversational_parts = [
-            part for part in user_parts
+            (part, words) for part, words in owner_parts
             if not _is_machine_session(part.session_id)
         ]
-        machine_skipped = len(user_parts) - len(conversational_parts)
+        machine_skipped = len(owner_parts) - len(conversational_parts)
         if machine_skipped:
             log.debug(
                 "MemoryExtractor: skipped %d machine-session message(s) — "
@@ -340,11 +346,11 @@ class MemoryExtractor:
                 "id": part.message_id,
                 "session_id": part.session_id,
                 "role": part.role,
-                "content": part.content,
+                "content": words,
                 "timestamp": part.timestamp,
                 "row_id": int(getattr(part, "row_id", 0) or 0),
             }
-            for part in conversational_parts
+            for part, words in conversational_parts
         ]
 
         if not messages:

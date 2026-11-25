@@ -259,6 +259,15 @@ async def launch_web(
     # POST /api/chat/send) can dispatch user messages through the same flow
     # the WebSocket uses, without duplicating the session+agent plumbing.
     app.state.ws_bridge = bridge
+    # The speech route's reply holder hears every frame the bridge broadcasts (web/speech_routes.py).
+    from prometheus.web.speech_routes import attach_bridge
+
+    attach_bridge(app, bridge)
+    # The git status of a work folder (web/git_routes.py): the watcher hears the bridge's frames and tells owner
+    # sockets when a folder changed; its startup proves the process limit holds before git/1 is advertised.
+    from prometheus.web.git_routes import attach_bridge as attach_git_watch
+
+    attach_git_watch(app, bridge)
     # POST /api/restart: the daemon's own restart, when it was started as the daemon.
     if request_restart is not None:
         app.state.request_restart = request_restart
@@ -346,6 +355,33 @@ async def launch_web(
         bridge.push_dispatcher = dispatcher
         if signal_bus:
             signal_bus.subscribe("*", dispatcher.on_signal)
+        # Piece 18: a Live Activity for a job the phone did not start. One 10 s tick over what is running; the
+        # sources are the bridge's turns, the TaskManager's tasks and coding runs, and the desktop tasks.
+        from prometheus.push.job_activity import (
+            DesktopSource,
+            JobActivityWatcher,
+            JobSource,
+            TaskSource,
+            TurnSource,
+        )
+
+        def _known_tool(name: str) -> bool:
+            # Read at each call: tools are registered and dropped after boot (MCP servers, packs).
+            registry = getattr(loop_context, "tool_registry", None)
+            return registry is not None and registry.get(name) is not None
+
+        dispatcher.known_tool = _known_tool
+        coding_source = TaskSource(get_task_manager(), kind="coding", known_tool=_known_tool)
+        job_sources: list[JobSource] = [TurnSource(bridge, known_tool=_known_tool),
+                                        TaskSource(get_task_manager(), kind="task"), coding_source]
+        if computer_runner is not None:
+            job_sources.append(DesktopSource(computer_runner))
+        if signal_bus:
+            signal_bus.subscribe("coding_round", coding_source.on_signal)
+            signal_bus.subscribe("coding_tool", coding_source.on_signal)
+        job_watcher = JobActivityWatcher(dispatcher, device_store, sources=job_sources)
+        job_watcher.start()
+        app.state.job_activity_watcher = job_watcher
         logger.info("APNs push enabled — topic %s, key %s",
                     apns_config.topic, apns_config.key_id)
 
@@ -397,5 +433,8 @@ async def launch_web(
         if notice.code != ALL_INTERFACES:
             logger.warning("network: %s", notice.message)
 
+    # The git self-test (is git held by the process limit here?) runs BEFORE any listener binds, so no client's
+    # `subscribed` ack can be built before `git/1` is decided (web/git_routes.py).
+    await app.state.git_watch.prepare()
     # Run every listener concurrently
     await asyncio.gather(*servers)

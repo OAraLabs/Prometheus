@@ -1,0 +1,101 @@
+{
+  "_generated": "DO NOT EDIT BY HAND. Regenerate with: uv run python scripts/gen_reference.py (source: src/prometheus/push/job_activity.py)",
+  "attributes_type": "JobActivityAttributes",
+  "attributes_keys": [
+    "kind",
+    "id",
+    "title",
+    "session_id",
+    "node_pub"
+  ],
+  "optional_attributes_keys": [
+    "session_id",
+    "node_pub"
+  ],
+  "content_state_keys": [
+    "phase",
+    "detail",
+    "elapsedS",
+    "steps"
+  ],
+  "kinds": [
+    "turn",
+    "task",
+    "coding",
+    "desktop"
+  ],
+  "live_phases": [
+    "running",
+    "paused",
+    "thinking",
+    "compacting",
+    "generating",
+    "tool"
+  ],
+  "end_phases": [
+    "done",
+    "failed",
+    "stopped",
+    "paused"
+  ],
+  "start_after_seconds": 60,
+  "update_every_seconds": 10,
+  "stale_after_seconds": 45,
+  "turn_end_outcome_key": "outcome",
+  "examples": {
+    "start": {
+      "aps": {
+        "timestamp": 1800000075,
+        "event": "start",
+        "content-state": {
+          "phase": "running",
+          "detail": "edit_file",
+          "elapsedS": 75,
+          "steps": 4
+        },
+        "stale-date": 1800000120,
+        "attributes-type": "JobActivityAttributes",
+        "attributes": {
+          "kind": "coding",
+          "id": "c1a2b3c4",
+          "title": "Coding run",
+          "session_id": "coding:c1a2b3c4",
+          "node_pub": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+        },
+        "alert": {
+          "title": "Still running",
+          "body": "A coding run is still running"
+        }
+      },
+      "node_pub": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+    },
+    "update": {
+      "aps": {
+        "timestamp": 1800000085,
+        "event": "update",
+        "content-state": {
+          "phase": "running",
+          "detail": "edit_file",
+          "elapsedS": 85,
+          "steps": 4
+        },
+        "stale-date": 1800000130
+      },
+      "node_pub": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+    },
+    "end": {
+      "aps": {
+        "timestamp": 1800000095,
+        "event": "end",
+        "dismissal-date": 1800000695,
+        "content-state": {
+          "phase": "done",
+          "detail": "edit_file",
+          "elapsedS": 95,
+          "steps": 4
+        }
+      },
+      "node_pub": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+    }
+  }
+}

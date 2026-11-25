@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from prometheus.gateway.config import Platform, PlatformConfig
+from prometheus.utils.file_extract import attachment_note, image_block, upload_block
 from prometheus.gateway.platform_base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -85,6 +86,18 @@ PROVIDER_PREFIX = "/prometheus provider "
 # Processing-feedback reactions (Slack's eyes → white_check_mark, natively)
 REACTION_PROCESSING = "\N{EYES}"          # 👀
 REACTION_DONE = "\N{WHITE HEAVY CHECK MARK}"  # ✅
+
+
+def _join_media_parts(parts: list[str]) -> str:
+    """One message's attachment texts, documents last.
+
+    A document's extracted text has no end marker, so anything after it reads as more of the document: a voice
+    note's transcription (the owner speaking) goes before it, where the memory extractor still counts it.
+    """
+    from prometheus.utils.file_extract import is_upload_block
+
+    present = [p for p in parts if p]
+    return "\n".join([p for p in present if not is_upload_block(p)] + [p for p in present if is_upload_block(p)])
 
 
 def chunk_message(text: str, max_length: int = MAX_MESSAGE_LENGTH) -> list[str]:
@@ -825,18 +838,17 @@ class DiscordAdapter(BasePlatformAdapter):
                         "attachment %s was not cached — forwarding without analysis",
                         filename,
                     )
-                    parts.append(
-                        f"[The user sent an image: {filename}; it could "
-                        f"not be stored for analysis]"
-                    )
+                    parts.append(attachment_note(
+                        f"The user sent an image: {filename}; it could not be stored for analysis"
+                    ))
                     continue
                 description = await media_services.describe_image(
                     cached, provider=self._get_provider(),
                 )
                 if description:
-                    parts.append(f"[Image: {description}]")
+                    parts.append(image_block(description))
                 else:
-                    parts.append(f"[The user sent an image: {filename}]")
+                    parts.append(attachment_note(f"The user sent an image: {filename}"))
                 media_urls.append(cached)
                 media_types.append(content_type or "image/unknown")
                 message_type = MessageType.PHOTO
@@ -857,10 +869,9 @@ class DiscordAdapter(BasePlatformAdapter):
                         "attachment %s was not cached — forwarding without transcription",
                         filename,
                     )
-                    parts.append(
-                        f"[The user sent a voice message: {filename}; it could "
-                        f"not be stored for transcription]"
-                    )
+                    parts.append(attachment_note(
+                        f"The user sent a voice message: {filename}; it could not be stored for transcription"
+                    ))
                     continue
                 voice_notices: list[str] = []
                 transcription = await media_services.transcribe_audio(
@@ -896,10 +907,9 @@ class DiscordAdapter(BasePlatformAdapter):
                         "attachment %s was not cached — forwarding without extraction",
                         filename,
                     )
-                    parts.append(
-                        f"[The user sent a document: {filename}; it could "
-                        f"not be stored for extraction]"
-                    )
+                    parts.append(attachment_note(
+                        f"The user sent a document: {filename}; it could not be stored for extraction"
+                    ))
                     continue
                 extracted = extract_text(cached)
                 if extracted:
@@ -910,9 +920,9 @@ class DiscordAdapter(BasePlatformAdapter):
                         tool_registry=self.tool_registry,
                         provider=self._get_provider(),
                     )
-                    parts.append(f"[Content of {filename}]:\n{extracted}")
+                    parts.append(upload_block(filename, extracted))
                 else:
-                    parts.append(f"[The user sent a document: {filename}]")
+                    parts.append(attachment_note(f"The user sent a document: {filename}"))
                 media_urls.append(cached)
                 media_types.append(
                     SUPPORTED_DOCUMENT_TYPES.get(
@@ -921,7 +931,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 )
                 message_type = MessageType.DOCUMENT
 
-        media_text = "\n".join(p for p in parts if p)
+        media_text = _join_media_parts(parts)
         if caption and media_text:
             text = f"{caption}\n\n{media_text}"
         else:

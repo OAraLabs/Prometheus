@@ -21,9 +21,12 @@ from uuid import uuid4
 from prometheus.engine.tool_context import RUN_SESSION
 from prometheus.permissions.approver import Approver
 from prometheus.permissions.argument_view import (
+    MAX_ARGUMENTS,
     format_arguments,
     redact_arguments,
+    view_was_cut,
 )
+from prometheus.permissions.critical import is_critical
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +126,11 @@ class PendingAction:
     #: A request to LIFT A DEVICE'S HOLD (permissions/hold_lifts.py): which device. Approve-once, answered only
     #: by a person, never by "approve all"; the hold stands until then.
     hold_device_id: str | None = None
+    #: The arguments were cut or masked when captured (``argument_view.view_was_cut``): what a surface shows
+    #: is not the whole call, so it is answered in the app (``permissions/critical.py``).
+    arguments_cut: bool = False
+    #: What the owner's critical lists matched at capture, from the RAW arguments (``CriticalRules.matches``).
+    critical_matches: tuple[str, ...] = ()
     #: The chat the prompt went to (Telegram), so a withdrawal is told where the request was asked. None: no chat.
     notify_chat: Any = None
     _event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
@@ -223,7 +231,7 @@ def derive_grant(
     """
     from pathlib import Path as _Path
 
-    from prometheus.permissions.checker import Grant
+    from prometheus.permissions.checker import Grant, is_single_invocation
     from prometheus.permissions.computer_extent import COMPUTER_ACTION_KIND
 
     extent = action.grant_computer_action
@@ -307,7 +315,10 @@ def derive_grant(
             widened=bool(widen),
             scope=stored_scope_for(verb),
         )
-    if action.grant_command:
+    if action.grant_command and is_single_invocation(action.grant_command):
+        # A chained or substituting command is not offered: Grant.matches refuses it, so "always" would promise a
+        # remembered approval that never applies and write a dead row to the config. It falls through to rule 4:
+        # approve once, remember nothing, and say so.
         return Grant(
             kind="command_prefix",
             value=action.grant_command,
@@ -494,6 +505,15 @@ class ApprovalQueue:
         while len(self._finished) > self.ORIGINS_REMEMBERED:
             self._finished.popitem(last=False)
 
+    def _critical_rules(self) -> Any:
+        """The owner's critical lists (``push.critical_*``); the launcher sets them, the defaults otherwise."""
+        rules = getattr(self, "critical_rules", None)
+        if rules is None:
+            from prometheus.permissions.critical import CriticalRules
+
+            rules = CriticalRules()
+        return rules
+
     def finished(self, request_id: str) -> tuple[str, str] | None:
         """``(resolution, detail)`` for a request this queue raised and that has ended (``approved``, ``denied``,
         ``expired`` or ``withdrawn`` with its reason), or None if it is still pending, never existed here, or is
@@ -553,6 +573,9 @@ class ApprovalQueue:
             "created_at": action.created_at,
             "expires_at": self.expires_at(action),
             "extents": prospective_extents(action),
+            # Answer in the app, never from a notification (permissions/critical.py). Computed HERE, once, so the
+            # REST list, the approval_pending frame and the push cannot disagree.
+            "critical": is_critical(action),
             # Already redacted and truncated (see PendingAction.arguments).
             # None means "this call had no arguments worth showing", which is
             # different from {} and Beacon may render the difference.
@@ -676,7 +699,13 @@ class ApprovalQueue:
         is identical to ``/approve`` and is pure noise carrying a multi-request
         verb, so it is omitted rather than described.
         """
+        if arguments and len(arguments) > MAX_ARGUMENTS:
+            # A call with this many arguments cannot be shown to a person, and an agent chooses their names: it is refused,
+            # not approved on a view that leaves some out.
+            logger.warning("approval for %s refused: %d arguments cannot be shown", tool_name, len(arguments))
+            return ApprovalResult.DENIED
         request_id = new_request_id()
+        view = redact_arguments(arguments, wire=worker_task_id is not None)
         action = PendingAction(
             request_id=request_id,
             tool_name=tool_name,
@@ -689,7 +718,10 @@ class ApprovalQueue:
             # row) renders the same already-safe mapping and none of them can
             # forget to scrub. Storing the raw dict and scrubbing per surface
             # is how one surface ends up echoing a secret.
-            arguments=redact_arguments(arguments),
+            arguments=view,
+            # What the view itself says it masked, cut or left out: the ⚠ line or the overflow row (argument_view).
+            arguments_cut=view_was_cut(view),
+            critical_matches=self._critical_rules().matches(tool_name, arguments, grant_file_path),
             session_id=session_id or RUN_SESSION.get(),
             once_only=once_only,
             worker_task_id=worker_task_id,
@@ -1150,6 +1182,16 @@ def is_desktop_request(action: Any) -> bool:
 def is_worker_request(action: Any) -> bool:
     """A spawned worker's request — answered on its own, like a desktop prompt."""
     return getattr(action, "worker_task_id", None) is not None
+
+
+#: Tools whose approval text IS the owner's private content (a memory entry): pushed with no content, and never
+#: part of "approve all" (GHSA-f68r-xfv4-83fr).
+PRIVATE_APPROVAL_TOOLS = frozenset({"memory"})
+
+
+def is_private_request(action: Any) -> bool:
+    """A request whose text is the owner's own content, read on its own and never pushed."""
+    return getattr(action, "tool_name", None) in PRIVATE_APPROVAL_TOOLS
 
 
 def is_hold_request(action: Any) -> bool:

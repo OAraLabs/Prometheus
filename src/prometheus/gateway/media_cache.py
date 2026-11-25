@@ -61,6 +61,21 @@ def image_cache_dir() -> Path:
     return _cache_dir("images")
 
 
+def cached_image(path: str | Path) -> Path | None:
+    """*path*, resolved, if it is a file inside the image cache (where an upload is stored); otherwise None.
+
+    What a surface may analyse or serve as an uploaded picture: a file the daemon stored itself, never another path
+    on the machine (GHSA-v65x-3634-7pcm). Links are resolved first, so one inside the cache that points out of it is
+    outside.
+    """
+    try:
+        resolved = Path(path).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    root = image_cache_dir().resolve()
+    return resolved if resolved.is_file() and resolved.is_relative_to(root) else None
+
+
 def audio_cache_dir() -> Path:
     return _cache_dir("audio")
 

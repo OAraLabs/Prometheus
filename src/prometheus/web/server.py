@@ -30,6 +30,7 @@ from prometheus.web.bind import DEFAULT_BIND
 from prometheus.web.loopback import is_loopback_host_header, is_same_machine
 from prometheus.web.route_access import is_scoped_allowed
 from prometheus.web.public_routes import is_public_route
+from prometheus.web.pause_routes import paused_response, register_pause_routes
 from prometheus.web.serving import bound_port
 from prometheus.web.session_scope import (
     Scope,
@@ -44,6 +45,7 @@ from prometheus.config import local_pairing
 from prometheus.config.device_store import registry_platform
 from prometheus.config.node_identity import get_instance_id, get_node_pubkey, identity_fields
 from prometheus.config.paths import get_wiki_root
+from prometheus.engine import pause as pause_state
 from prometheus.context.environment import (
     booted_from as _booted_from,
     deployment_freshness,
@@ -464,6 +466,11 @@ def create_app(
     # extension, which has no WS client. Capped separately.
     _MAX_RECORDING_BODY_BYTES = 32 * 1024 * 1024
     _RECORDING_UPLOAD_PATH = "/api/learning/live-upload"
+    # A chat project's reference file (PUT /api/chat-projects/{id}/files/{name}): up to 20 MB, read by the route with a
+    # running count, so a chunked body is cut off too. Exactly that route shape, PUT only.
+    _MAX_PROJECT_FILE_BYTES = 20 * 1024 * 1024
+    import re as _re
+    _PROJECT_FILE_PATH = _re.compile(r"^/api/chat-projects/[^/]+/files/[^/]+$")
 
     @app.middleware("http")
     async def _check_bearer_token(request: Request, call_next):
@@ -483,11 +490,14 @@ def create_app(
             body_cap = (
                 _MAX_RECORDING_BODY_BYTES
                 if path == _RECORDING_UPLOAD_PATH
+                else _MAX_PROJECT_FILE_BYTES
+                if request.method == "PUT" and _PROJECT_FILE_PATH.match(path)
                 else _MAX_BODY_BYTES
             )
             try:
                 if int(cl) > body_cap:
-                    return JSONResponse(status_code=413, content={"error": "request body too large"})
+                    return JSONResponse(status_code=413, content={"error": "request body too large",
+                                                                  "kind": "too_large"})
             except ValueError:
                 return JSONResponse(status_code=400, content={"error": "invalid Content-Length"})
         # The EXACT list of routes that answer without a token (web/public_routes.py); each does its own
@@ -727,6 +737,41 @@ def create_app(
             return JSONResponse(status_code=404, content={"error": f"unknown device {device_id}"})
         return {"ok": True}
 
+    #: A push-to-start or activity token is a short hex string; anything far longer is not one.
+    _ACTIVITY_TOKEN_CAP = 512
+
+    def _activity_key(body: dict):
+        """``(kind, id)`` from an activity body, or an error response.
+
+        ``{kind, id}`` with kind ``turn | task | coding | desktop`` (Piece 18), or the older ``{session_id}``, which
+        keeps meaning ``kind: turn``. A turn is keyed by its session id and stored apart from every other kind, so
+        session ``coding:c1`` and coding run ``c1`` never share a token."""
+        from prometheus.push.job_activity import ID_CAP, JOB_KINDS
+
+        if "kind" in body or "id" in body:
+            kind = str(body.get("kind") or "").strip()
+            job_id = str(body.get("id") or "").strip()
+            if kind not in JOB_KINDS or not job_id:
+                return JSONResponse(status_code=400, content={
+                    "error": f"need kind ({' | '.join(JOB_KINDS)}) and id"})
+        else:
+            kind, job_id = "turn", str(body.get("session_id") or "").strip()
+            if not job_id:
+                return JSONResponse(status_code=400, content={"error": "need session_id, or kind and id"})
+        if len(job_id) > ID_CAP:
+            return JSONResponse(status_code=400, content={"error": f"id longer than {ID_CAP} characters"})
+        return kind, job_id
+
+    def _may_follow(request: Request, kind: str, job_id: str):
+        """A live activity streams a job's progress to the phone. A turn: for a session the device owns (an
+        operator, any; not-yours is the 404 a missing session gets). Every other kind is the operator's: a scoped
+        device sees no task, coding run or desktop task anywhere else either."""
+        if kind == "turn":
+            return None if _access.owns(_scope(request), job_id) else _unknown_session()
+        if not _scope(request).unrestricted:
+            return JSONResponse(status_code=403, content={"error": "operator_only"})
+        return None
+
     @app.post("/api/devices/{device_id}/activity")
     async def register_activity(device_id: str, request: Request):
         if (err := _may_manage_push(request, device_id)) is not None:
@@ -735,16 +780,26 @@ def create_app(
             body = await request.json()
         except Exception:
             return JSONResponse(status_code=400, content={"error": "body must be JSON"})
-        session_id = str(body.get("session_id") or "").strip()
+        if not isinstance(body, dict):
+            return JSONResponse(status_code=400, content={"error": "body must be a JSON object"})
+        key = _activity_key(body)
+        if isinstance(key, JSONResponse):
+            return key
+        kind, job_id = key
         activity_token = str(body.get("activity_token") or "").strip()
-        if not session_id or not activity_token:
-            return JSONResponse(status_code=400, content={
-                "error": "need session_id and activity_token"})
-        # A live activity streams a session's progress to the phone, so a device may register one only for a
-        # session it owns (an operator, for any). Not-yours is the 404 a missing session gets.
-        if not _access.owns(_scope(request), session_id):
-            return _unknown_session()
-        _devices_or_create().set_activity_token(device_id, session_id, activity_token)
+        if not activity_token or len(activity_token) > _ACTIVITY_TOKEN_CAP:
+            return JSONResponse(status_code=400, content={"error": "need activity_token"})
+        if (err := _may_follow(request, kind, job_id)) is not None:
+            return err
+        # A token for a job that ended before the phone registered it (the end went to nobody) is answered with the
+        # end at once and not stored (push/job_activity.py, end_if_ended).
+        watcher = getattr(app.state, "job_activity_watcher", None)
+        if watcher is not None and await watcher.end_if_ended(device_id, kind, job_id, activity_token):
+            return {"ok": True, "ended": True}
+        if kind == "turn":
+            _devices_or_create().set_activity_token(device_id, job_id, activity_token)
+        else:
+            _devices_or_create().set_job_activity_token(device_id, kind, job_id, activity_token)
         return {"ok": True}
 
     @app.delete("/api/devices/{device_id}/activity")
@@ -755,10 +810,40 @@ def create_app(
             body = await request.json()
         except Exception:
             body = {}
-        session_id = str(body.get("session_id") or "").strip()
-        if not session_id:
-            return JSONResponse(status_code=400, content={"error": "need session_id"})
-        _devices_or_create().clear_activity_token(device_id, session_id)
+        key = _activity_key(body if isinstance(body, dict) else {})
+        if isinstance(key, JSONResponse):
+            return key
+        kind, job_id = key
+        if kind == "turn":
+            _devices_or_create().clear_activity_token(device_id, job_id)
+        else:
+            _devices_or_create().clear_job_activity_token(device_id, kind, job_id)
+        return {"ok": True}
+
+    @app.put("/api/devices/{device_id}/activity-start")
+    async def register_activity_start(device_id: str, request: Request):
+        """A phone's push-to-start token (iOS 17.2), so the daemon can start a Live Activity on it for a job it did
+        not start (push/job_activity.py). Body ``{"token": str}``. The device's own registration, like ``/push``.
+        Never listed by ``GET /api/devices``."""
+        if (err := _may_manage_push(request, device_id)) is not None:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "body must be JSON"})
+        token = str((body if isinstance(body, dict) else {}).get("token") or "").strip()
+        if not token or len(token) > _ACTIVITY_TOKEN_CAP:
+            return JSONResponse(status_code=400, content={"error": "need token"})
+        if not _devices_or_create().set_activity_start_token(device_id, token):
+            return JSONResponse(status_code=404, content={"error": f"unknown or revoked device {device_id}"})
+        return {"ok": True}
+
+    @app.delete("/api/devices/{device_id}/activity-start")
+    async def unregister_activity_start(device_id: str, request: Request):
+        if (err := _may_manage_push(request, device_id)) is not None:
+            return err
+        if not _devices_or_create().clear_activity_start_token(device_id):
+            return JSONResponse(status_code=404, content={"error": f"unknown device {device_id}"})
         return {"ok": True}
 
     @app.delete("/api/devices/{device_id}")
@@ -1072,6 +1157,9 @@ def create_app(
     # A public route (web/public_routes.py), so the bearer gate does not apply and the route does its own
     # checking: no browsers, a per-peer limit, no CORS, no disk writes. Contract: docs/PAIRING-APPROVAL-API.md.
     _hello_limiter = hello_mod.new_limiter()
+    from prometheus.web.identity_challenge import identity_hosts as _identity_hosts_of
+
+    _identity_hosts = _identity_hosts_of(config)
 
     def _hello_payload(tls: bool = False) -> dict[str, Any]:
         """*tls*: whether the port being described speaks TLS (the asked port for the route, the advertised
@@ -1096,12 +1184,21 @@ def create_app(
     async def identity_challenge(request: Request):
         from prometheus.web import identity_challenge as challenge_mod
 
+        from prometheus.web.loopback import local_address
+
         tls = request.url.scheme == "https"
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001 - no body or not JSON: the nonce check refuses it
             body = None
-        return hello_mod.guarded_response(request, _hello_limiter, lambda: challenge_mod.answer(body, tls=tls))
+        # v2 (GHSA-75cg-fxc2-f93j) binds the host the client dialled: the Host header exactly as received (one of
+        # them, never X-Forwarded-Host) and the local address the connection arrived on.
+        hosts = [v for k, v in request.scope.get("headers") or () if k.lower() == b"host"]
+        host_header = hosts[0].decode("latin-1") if len(hosts) == 1 else None
+        return hello_mod.guarded_response(
+            request, _hello_limiter,
+            lambda: challenge_mod.answer(body, tls=tls, host_header=host_header, local_ip=local_address(request),
+                                         extra_hosts=_identity_hosts))
 
     # ── Root ────────────────────────────────────────────────────────
 
@@ -1372,8 +1469,11 @@ def create_app(
         ) or getattr(app.state, "agent_state", "idle")
         security_state = await _floor_state()
         hello_now = _hello_payload()
+        _paused = pause_state.current()
         return {
             "state": _live_state,
+            # Pause everything (engine/pause.py): null, or {since, by, reason}.
+            "paused": _paused.to_dict() if _paused is not None else None,
             "model": app.state.current_model,
             # WHAT NEEDS THE OPERATOR, as a list a client can show as-is: {code, level, message, fix}. Each item
             # comes from a probe or a check, never from config read back. The bash floors' own `dark` stays in
@@ -1574,6 +1674,11 @@ def create_app(
         _mine = _access.owned_ids(_scope(request))
         if _mine is not None:
             by_id = {sid: row for sid, row in by_id.items() if sid in _mine}
+        # Chat projects (docs/design/chat-projects.md 3.3): one lookup AFTER both branches, so the live overlay,
+        # which replaces the durable dict, cannot drop it.
+        _filed = store.chat_projects().projects_of(by_id.keys()) if store is not None and by_id else {}
+        for _sid, _row in by_id.items():
+            _row["chat_project_id"] = _filed.get(_sid)
         return sorted(
             by_id.values(), key=lambda s: s["last_active"] or 0.0, reverse=True
         )
@@ -1602,6 +1707,7 @@ def create_app(
         import uuid
 
         gateway = "desktop"
+        chat_project_id: Any = None
         try:
             body = await request.json()
             # PRESENT-but-empty is a caller bug, not "unspecified" — it falls
@@ -1609,8 +1715,27 @@ def create_app(
             # becoming "desktop". Absent key / no body → the default.
             if isinstance(body, dict) and "gateway" in body:
                 gateway = str(body["gateway"] or "").strip()
+            if isinstance(body, dict):
+                chat_project_id = body.get("chat_project_id")
         except Exception:
             pass  # no/invalid body → the default; this route has no required input
+        # Starting in a chat project (docs/design/chat-projects.md 3.2): the owner's only, checked before an id is
+        # minted, so a refusal creates nothing.
+        if chat_project_id is not None:
+            if not isinstance(chat_project_id, str):
+                return JSONResponse(status_code=400, content={"error": "chat_project_id must be a string",
+                                                              "kind": "bad_request"})
+            if not _scope(request).unrestricted:
+                return JSONResponse(status_code=403, content={"error": "only the owner may start a conversation "
+                                                              "in a project", "kind": "operator_only"})
+            _checked = app.state.chat_projects.precheck(chat_project_id)
+            if isinstance(_checked, JSONResponse):
+                return _checked
+            from prometheus.memory.session_kind import is_machine_session as _is_machine
+
+            if _is_machine(f"{str(gateway).strip().lower()}:x"):
+                return JSONResponse(status_code=400, content={
+                    "error": "a machine session cannot be started in a project", "kind": "machine_session"})
 
         # The id is parsed by splitting on the FIRST colon, so a colon in the
         # gateway would silently truncate it. Keep the charset boring.
@@ -1630,7 +1755,33 @@ def create_app(
             return _unknown_session()
         if session_mgr:
             session_mgr.get_or_create(sid)
+        if chat_project_id is not None:
+            _filed = await app.state.chat_projects.file(sid, chat_project_id)
+            if isinstance(_filed, JSONResponse):
+                return _filed
+            return {"session_id": sid, "gateway": gateway.lower(), "chat_project_id": chat_project_id,
+                    "workspace": _filed["workspace"]}
         return {"session_id": sid, "gateway": gateway.lower()}
+
+    # client_msg_ids this daemon has accepted on /api/chat/send, newest last: (session, id) -> the run it answered
+    # with. In memory so a retry that arrives while the first is still in flight is caught, and bounded; the
+    # stored rows (message_client_ids) answer for anything older or from before a restart.
+    from collections import OrderedDict as _OrderedDict
+
+    _sent_client_ids: "_OrderedDict[tuple[str, str], str]" = _OrderedDict()
+    _SENT_CLIENT_IDS_MAX = 4096
+    # The claims whose first send is still being dispatched: a repeat that arrives meanwhile WAITS for it, and is
+    # then answered by how it went (sent: a duplicate; failed: the repeat sends it itself). Answering "sent" at
+    # once would tell a client that a message whose dispatch then failed had arrived, and it would never retry.
+    _sending_client_ids: dict[tuple[str, str], asyncio.Future] = {}
+
+    def _client_id_stored(session_id: str, client_msg_id: str) -> bool:
+        store = _conversation_store()
+        try:
+            return bool(store is not None and store.has_message_client_id(session_id, client_msg_id))
+        except Exception:                        # noqa: BLE001 - a store that cannot say counts as "not seen"
+            logger.debug("client_msg_id lookup failed", exc_info=True)
+            return False
 
     @app.post("/api/chat/send")
     async def send_chat(request: Request):
@@ -1652,6 +1803,9 @@ def create_app(
             disabled but route still mounted) — explicit so the caller
             doesn't think a queued message succeeded
         """
+        # Paused (engine/pause.py): nothing new runs, and the message is not kept to run on resume.
+        if (refusal := paused_response(request)) is not None:
+            return refusal
         try:
             body = await request.json()
         except Exception:
@@ -1741,13 +1895,46 @@ def create_app(
                     blocks = await bridge.resolve_references(session_id, refs)
                 except ReferenceRefused as exc:
                     return JSONResponse(status_code=exc.status, content={"error": str(exc), "kind": exc.kind})
-        await bridge.dispatch_user_message(
-            session_id, message, client_msg_id=client_msg_id, mode=mode, tool_choice=tool_choice,
-            **({"blocks": blocks} if blocks else {}),
-            # A scoped device's commands are default-deny (web/route_access.SCOPED_SLASH_COMMANDS). The keyword
-            # rides only when it is False, so a duck-typed bridge that predates it still works.
-            **({} if _scope(request).unrestricted else {"operator": False}),
-        )
+        # A repeat of a client_msg_id in the same session is the SAME message: the client sent it, did not hear
+        # back, and sent it again. Answer with the first one's run and dispatch nothing. Checked here, after every
+        # refusal above (a refused request claims nothing, and a session that is not the caller's has already
+        # been turned away, so this cannot say anything about another device's ids), and claimed BEFORE the
+        # first await so two requests in flight at once cannot both pass.
+        claim = None
+        sending: asyncio.Future | None = None
+        if client_msg_id:
+            claim = (session_id, client_msg_id)
+            while (first := _sending_client_ids.get(claim)) is not None:
+                await asyncio.shield(first)          # never raises: it is only ever given a result
+            seen = _sent_client_ids.get(claim)
+            if seen is None and _client_id_stored(session_id, client_msg_id):
+                seen = idempotency_key
+            if seen is not None:
+                return {"run_id": seen, "status": "sent", "duplicate": True}
+            _sent_client_ids[claim] = idempotency_key
+            while len(_sent_client_ids) > _SENT_CLIENT_IDS_MAX:
+                _sent_client_ids.popitem(last=False)
+            sending = asyncio.get_running_loop().create_future()
+            _sending_client_ids[claim] = sending
+        try:
+            await bridge.dispatch_user_message(
+                session_id, message, client_msg_id=client_msg_id, mode=mode, tool_choice=tool_choice,
+                **({"blocks": blocks} if blocks else {}),
+                # A scoped device's commands are default-deny (web/route_access.SCOPED_SLASH_COMMANDS). The keyword
+                # rides only when it is False, so a duck-typed bridge that predates it still works.
+                **({} if _scope(request).unrestricted else {"operator": False}),
+            )
+        except BaseException:
+            # Not sent: a retry must be able to send it.
+            if claim is not None:
+                _sent_client_ids.pop(claim, None)
+            raise
+        finally:
+            if claim is not None and sending is not None:
+                if _sending_client_ids.get(claim) is sending:
+                    del _sending_client_ids[claim]
+                if not sending.done():
+                    sending.set_result(None)
         return {"run_id": idempotency_key, "status": "sent"}
 
     @app.post("/api/chat/interrupt")
@@ -1807,6 +1994,9 @@ def create_app(
           * 503 when ``gateway.paperclip.enabled`` is false / gateway unwired
           * 400 on malformed JSON or a body missing ``runId``/``agentId``
         """
+        # Paused (engine/pause.py): nothing new runs, and the message is not kept to run on resume.
+        if (refusal := paused_response(request)) is not None:
+            return refusal
         gateway = getattr(app.state, "paperclip_gateway", None)
         if gateway is None or not hasattr(gateway, "start_heartbeat"):
             return JSONResponse(
@@ -2315,6 +2505,12 @@ def create_app(
     # Setting it is therefore a security-relevant write, validated here.
     from prometheus.context.workspace import validate_workspace_path as _validate_workspace
 
+    def _git_touch(session_id: str) -> None:
+        """The binding changed: owner devices watching this session's git state are told if it differs now."""
+        watch = getattr(app.state, "git_watch", None)
+        if watch is not None:
+            watch.touch(session_id)
+
     @app.get("/api/sessions/{session_id}/workspace")
     async def get_session_workspace(session_id: str):
         """The effective working directory for this session and where it came
@@ -2355,6 +2551,7 @@ def create_app(
         if not raw:
             store.set_session_workspace(session_id, "", set_by="rest")
             logger.info("session workspace CLEARED for %s (rest)", session_id)
+            _git_touch(session_id)
             return {"ok": True, "session_id": session_id, "workspace": None}
         resolved, why = _validate_workspace(raw, config.get("security", {}) or {})
         if resolved is None:
@@ -2364,6 +2561,7 @@ def create_app(
         # where an operator reading the journal will see it.
         logger.warning("session workspace SET for %s → %s (rest) — this is now that "
                        "conversation's write boundary", session_id, resolved)
+        _git_touch(session_id)
         return {"ok": True, "session_id": session_id, "workspace": str(resolved)}
 
     @app.delete("/api/sessions/{session_id}/workspace")
@@ -2374,6 +2572,7 @@ def create_app(
             return JSONResponse({"error": "no durable store — session workspaces unavailable"}, status_code=503)
         store.set_session_workspace(session_id, "", set_by="rest")
         logger.info("session workspace CLEARED for %s (rest)", session_id)
+        _git_touch(session_id)
         return {"ok": True, "session_id": session_id, "workspace": None}
 
     # ── File checkpoints (item 4, 2026-09-01) ─────────────────────────
@@ -4441,10 +4640,13 @@ def create_app(
         return {"ok": True, "name": name}
 
     @app.post("/api/cron/{name}/run")
-    async def run_cron_job_now(name: str):
+    async def run_cron_job_now(name: str, request: Request):
         """Trigger a job immediately. Fire-and-forget: a job may run up to 300s, so
         the executor is dispatched as a background task and the call returns at once;
         the outcome surfaces via the job's last_run/last_status (re-GET /api/cron)."""
+        # Paused (engine/pause.py): nothing new runs. Said here, not as a 'skipped' run after a 200.
+        if (refusal := paused_response(request)) is not None:
+            return refusal
         import asyncio
 
         from prometheus.gateway.cron_scheduler import execute_job
@@ -5271,8 +5473,9 @@ def create_app(
         if not queue:
             return JSONResponse(status_code=404, content={"error": "approval queue not enabled"})
         # ONE request id, and nothing else (2026-11-13): the approve path used to build chat-command text from this
-        # segment, so "all" answered every pending request, and a notification carrying it would turn one tap into
-        # approving everything. Anything that is not an id the queues mint is a 404, before anything reads it.
+        # segment, so "all" answered every pending request. A client acts on exactly the request it shows; several at
+        # once is a chat command, not offered over REST. Anything that is not an id the queues mint is a 404, before
+        # anything reads it.
         from prometheus.permissions.approval_queue import is_request_id as _is_request_id
 
         if not _is_request_id(request_id):
@@ -5483,14 +5686,42 @@ def create_app(
             )
         return {"ok": True, "id": grant_id, "revoked": described}
 
+    # Registered AFTER ``/api/approvals/grants``: routes match in order, so "grants" keeps its own handler.
+    @app.get("/api/approvals/{request_id}")
+    async def get_approval(request_id: str, request: Request):
+        """One request by id (Beacon iOS "Piece 16b"): a notification opened later can tell whether it is live.
+
+        ``200`` with the ``serialize_pending`` dict while pending (the list's entry, byte for byte); ``410`` with
+        ``resolution`` and ``detail`` once it has ended (``_no_longer_active``, the approve route's own answer);
+        ``404`` when it is not the caller's or this daemon has no record of it. Not the approve route's "no record
+        is a 410": a read has nothing to act on, and "never raised here" is what a phone paired with several
+        daemons needs to hear. Same ownership rule and order as approve: a scoped device hears only about its own
+        sessions' requests, and anything else is the same 404 as "never existed".
+        """
+        queue = app.state.approval_queue
+        if not queue or request_id == "all":
+            return JSONResponse(status_code=404, content={"error": "unknown request"})
+        pending = (getattr(queue, "pending", {}) or {}).get(request_id)
+        ended = getattr(queue, "finished", lambda _rid: None)(request_id)
+        if ended is not None:
+            if (refusal := _no_longer_active(request, request_id)) is not None:
+                return refusal
+            return JSONResponse(status_code=404, content={"error": "unknown request"})
+        if pending is None:
+            return JSONResponse(status_code=404, content={"error": "unknown request"})
+        if (refusal := _not_mine(request, request_id)) is not None:
+            return refusal
+        return queue.serialize_pending(pending)
+
     @app.post("/api/approvals/{request_id}/deny")
     async def deny_action(request_id: str, request: Request):
         queue = app.state.approval_queue
         if not queue:
             return JSONResponse(status_code=404, content={"error": "approval queue not enabled"})
         # ONE request id, and nothing else (2026-11-13): the approve path used to build chat-command text from this
-        # segment, so "all" answered every pending request, and a notification carrying it would turn one tap into
-        # approving everything. Anything that is not an id the queues mint is a 404, before anything reads it.
+        # segment, so "all" answered every pending request. A client acts on exactly the request it shows; several at
+        # once is a chat command, not offered over REST. Anything that is not an id the queues mint is a 404, before
+        # anything reads it.
         from prometheus.permissions.approval_queue import is_request_id as _is_request_id
 
         if not _is_request_id(request_id):
@@ -5521,6 +5752,9 @@ def create_app(
         name resolved to whichever came last. Renamed while wiring the lint
         gate (ruff F811).
         """
+        # Paused (engine/pause.py): nothing new runs, and the message is not kept to run on resume.
+        if (refusal := paused_response(request)) is not None:
+            return refusal
         session_id = body.get("session_id", "")
         content = body.get("content", "")
         if not session_id or not content:
@@ -5580,7 +5814,11 @@ def create_app(
         # its next tick, so AutoDream pauses. Never raises.
         activity.note_user_activity()
         outcomes.note_user_message(f"web:{session_id}", content)
-        session.add_user_message(content)
+        # A scoped device is not the owner: its message is marked as its own, so it teaches nothing.
+        from prometheus.engine.messages import SCOPED_DEVICE_AUTHOR
+        _identity = getattr(request.state, "device_identity", None)
+        _scoped = _identity is not None and not getattr(_identity, "is_operator", False)
+        session.add_user_message(content, **({"author": SCOPED_DEVICE_AUTHOR} if _scoped else {}))
         # pre_len AFTER the user append — the index in result.messages where
         # the loop's new content starts, same as every gateway adapter. The
         # old ``len(...) - 1`` here re-included the user turn: re-appended in
@@ -5613,7 +5851,8 @@ def create_app(
             # would have been a no-op that read like a fix and taught the next
             # reader that this route selects its own tools. It does not.
             with turn_mcp_headers(turn_headers):
-                result = await agent_loop.run_async(
+                # A task of its own, so a pause can cancel this turn (and only it): engine/pause.py.
+                result = await pause_state.run_as_turn(agent_loop.run_async(
                     system_prompt=system_prompt,
                     messages=session.get_messages(),
                     # RECORD-ONLY (WP-X.21 T4): the telemetry rows name the
@@ -5622,7 +5861,7 @@ def create_app(
                     # override lookup for this route, which stays 'system'.
                     record_session_id=f"web:{session_id}",
                     surface="rest",
-                )
+                ))
             session.add_result_messages(result.messages, pre_len)
             reply = {
                 "text": result.text,
@@ -5638,6 +5877,8 @@ def create_app(
             if served_by:
                 reply["served_by"] = served_by
             return reply
+        except pause_state.Paused:
+            return paused_response(request) or JSONResponse(status_code=423, content={"error": "paused"})
         except MaxTurnsExhausted as cap:
         # #774: a turn that hit its round cap kept its work — save it, never
         # roll it back. run_async handed the loop a COPY of the session list,
@@ -5997,6 +6238,9 @@ def create_app(
 
     @app.post("/api/computer/tasks", status_code=202)
     async def computer_task_start(request: Request):
+        # Paused (engine/pause.py): no new desktop task starts.
+        if (refusal := paused_response(request)) is not None:
+            return refusal
         runner, err = _door_runner()
         if err is not None:
             return err
@@ -6380,8 +6624,42 @@ def create_app(
 
     _KEY_VALUE_MAX_CHARS = 4096  # sanity cap; real provider keys are far shorter
 
-    def _provider_keys_payload() -> dict:
+    from prometheus.providers import plans as _plans
+
+    def _plan_fields(service_id: str) -> dict:
+        # Subscription plans (providers/plans.py), in the shape the apps record against
+        # (docs/reference/subscription-plans.md). No host anywhere: a client picks a plan by id, and the plan in use
+        # is an id too ("workspace" for a workspace host, "custom" for a hand-set endpoint on no list).
+        plans = _plans.plans_for(service_id)
+        endpoint_env = _plans.endpoint_env_for(service_id)
         return {
+            "plans": [
+                {
+                    "id": p.id,
+                    "label": p.label,
+                    "subscription": p.terms == _plans.TERMS_INTERACTIVE,
+                    # The terms label: the one-line note for a plan its provider limits to interactive use, else null.
+                    "terms": p.terms_note if p.terms == _plans.TERMS_INTERACTIVE else None,
+                    "default": i == 0,
+                    # True for the plan that takes input of its own (a workspace id and region).
+                    "custom": p.id == _plans.WORKSPACE_PLAN,
+                    # The region slugs a custom (workspace) plan accepts; empty for every other plan.
+                    "regions": list(_plans.WORKSPACE_REGIONS) if p.id == _plans.WORKSPACE_PLAN else [],
+                    "separate_keys": p.separate_keys,
+                    "models": list(p.models),
+                }
+                for i, p in enumerate(plans)
+            ],
+            "plan": _plans.active_plan(service_id, config),
+            "endpoint_set": bool(endpoint_env and os.environ.get(endpoint_env)),
+            "plan_pinned_in_config": bool(plans) and _plans.base_url_pinned_in_config(service_id, config),
+        }
+
+    def _provider_keys_payload() -> dict:
+        warnings = _plans.unattended_warnings(config)
+        return {
+            "capabilities": {"plans": 1},
+            "workspace_regions": list(_plans.WORKSPACE_REGIONS),
             "services": [
                 {
                     "id": svc.id,
@@ -6393,6 +6671,8 @@ def create_app(
                     ],
                     "docs_url": svc.docs_url,
                     "default_model": svc.default_model,
+                    **_plan_fields(svc.id),
+                    "warnings": warnings.get(svc.id, []),
                 }
                 for svc in provider_key_services(config)
             ]
@@ -6406,7 +6686,7 @@ def create_app(
     async def put_provider_keys(service_id: str, body: dict):
         import logging as _logging
 
-        from prometheus.config.env_file import set_env_value
+        from prometheus.config.env_file import set_env_values
 
         svc = next(
             (s for s in provider_key_services(config) if s.id == service_id),
@@ -6437,24 +6717,90 @@ def create_app(
             if len(value) > _KEY_VALUE_MAX_CHARS:
                 return JSONResponse(status_code=400, content={
                     "error": f"value for {name} is implausibly long"})
-            if any(ord(ch) < 0x20 for ch in value):
+            from prometheus.config.env_file import env_value_problem
+
+            if problem := env_value_problem(value):
                 # The env file is line-based — a control character (esp. \n)
                 # in a value could inject a second VAR= assignment.
                 return JSONResponse(status_code=400, content={
-                    "error": f"value for {name} contains control characters"})
+                    "error": f"value for {name} {problem}"})
             cleaned[name] = value
 
-        for name, value in cleaned.items():
+        # A plan, when one is sent, is saved TOGETHER with the key: a plan's host takes only that plan's key, so
+        # moving an old key to a new host is never what a person meant. The endpoint is written only from the
+        # fixed list in providers/plans.py (or the one workspace pattern), never from the body.
+        endpoint_write: tuple[str, str] | None = None
+        if "plan" in body or "workspace" in body:
+            plan_id = body.get("plan")
+            plan = _plans.plan_by_id(service_id, plan_id) if isinstance(plan_id, str) else None
+            if not _plans.plans_for(service_id):
+                return JSONResponse(status_code=400, content={
+                    "error": f"service {service_id!r} has no plans"})
+            if plan is None:
+                return JSONResponse(status_code=400, content={
+                    "error": "plan must be one of: "
+                             + ", ".join(p.id for p in _plans.plans_for(service_id))})
+            if _plans.active_plan(service_id, config) is None:
+                # prometheus.yaml points this service at another provider, which never reads the plan's variable.
+                return JSONResponse(status_code=409, content={
+                    "error": f"prometheus.yaml sets slash_commands.{service_id}.provider, so a plan would not "
+                             "apply; remove it to choose a plan here"})
+            key_var = svc.env_vars[0]
+            if not cleaned.get(key_var):
+                return JSONResponse(status_code=400, content={
+                    "error": f"a plan is saved together with its key: send {key_var} in values"})
+            # An endpoint set by hand (on no list) is the owner's own; replacing it is said out loud.
+            if _plans.active_plan(service_id, config) == _plans.CUSTOM_PLAN and body.get("replace_custom") is not True \
+                    and not _plans.base_url_pinned_in_config(service_id, config):
+                return JSONResponse(status_code=409, content={
+                    "error": "this provider uses an endpoint set by hand; send \"replace_custom\": true to "
+                             "replace it with a plan"})
+            if _plans.base_url_pinned_in_config(service_id, config):
+                return JSONResponse(status_code=409, content={
+                    "error": f"prometheus.yaml sets slash_commands.{service_id}.base_url, which wins over a "
+                             "saved plan; remove it to choose a plan here"})
+            if plan.id == _plans.WORKSPACE_PLAN:
+                ws = body.get("workspace")
+                if not isinstance(ws, dict):
+                    return JSONResponse(status_code=400, content={
+                        "error": 'the workspace plan needs "workspace": {"id": ..., "region": ...}'})
+                try:
+                    endpoint = _plans.workspace_endpoint(ws.get("id"), ws.get("region"))
+                except _plans.PlanError as exc:
+                    return JSONResponse(status_code=400, content={"error": str(exc)})
+            elif body.get("workspace") is not None:
+                return JSONResponse(status_code=400, content={
+                    "error": "workspace is only for the workspace plan"})
+            else:
+                # The default plan clears the variable, so the provider's own default applies.
+                endpoint = "" if plan is _plans.plans_for(service_id)[0] else plan.endpoint
+            endpoint_write = (_plans.endpoint_env_for(service_id), endpoint)
+
+        # One rewrite of the env file for the key and its endpoint together, then the live environment: a failed
+        # write changes neither, so a key is never left paired with the wrong host.
+        file_writes = dict(cleaned)
+        if endpoint_write is not None:
+            file_writes[endpoint_write[0]] = endpoint_write[1]
+        set_env_values(file_writes)  # a blank value is a deliberate blank line, api_token-style
+        for name, value in file_writes.items():
             if value:
-                set_env_value(name, value)
                 os.environ[name] = value
             else:
-                set_env_value(name, "")  # deliberate blank line, api_token-style
                 os.environ.pop(name, None)
+        for name, value in cleaned.items():
             _logging.getLogger(__name__).info(
                 "provider key %s: %s %s",
                 service_id, "set" if value else "cleared", name,
             )
+        if endpoint_write is not None:
+            # The plan id, never the endpoint: a workspace host names the account.
+            _logging.getLogger(__name__).info(
+                "provider plan %s: %s (%s)", service_id, body.get("plan"), endpoint_write[0])
+
+        # Sessions already on this provider rebuild against what was just saved on their next turn: no restart.
+        router = getattr(app.state, "model_router", None)
+        if router is not None and svc.kind == "llm":
+            router.refresh_preset(service_id, config)
 
         # Same booleans as GET so the client refreshes its view from us.
         return _provider_keys_payload()
@@ -6521,7 +6867,10 @@ def create_app(
         return {"logged_out": xai_oauth.logout()}
 
     @app.post("/api/code")
-    async def create_coding_run(body: dict):
+    async def create_coding_run(body: dict, request: Request):
+        # Paused (engine/pause.py): no new coding run starts.
+        if (refusal := paused_response(request)) is not None:
+            return refusal
         from uuid import uuid4 as _uuid4
 
         from prometheus.coding.managed import create_coding_managed_task
@@ -6949,6 +7298,9 @@ def create_app(
         Reuses the same ws_bridge path as POST /api/chat/send. Matches the web
         semantics: if no bridge is wired, 503 WITHOUT stamping (the task did not
         actually go out)."""
+        # Paused (engine/pause.py): nothing new runs, and the message is not kept to run on resume.
+        if (refusal := paused_response(request)) is not None:
+            return refusal
         from prometheus.kanban import get_kanban_store
 
         store = get_kanban_store()
@@ -6987,6 +7339,9 @@ def create_app(
         if updated is None:
             return JSONResponse(status_code=404, content={"error": "story not found"})
         return {"ok": True, "story": updated}
+
+    # ── Pause everything (Beacon iOS Piece 17; web/pause_routes.py) ─────────
+    register_pause_routes(app, devices=_devices_or_create)
 
     # ── OpenAI-compatible surface (item 2, 2026-09-01) ─────────────────────
     # Registered BEFORE the static catch-all below, like every route.
@@ -7032,6 +7387,30 @@ def create_app(
     from prometheus.web.pieces_routes import register_pieces_routes
 
     register_pieces_routes(app, devices=_devices_or_create, auth_on=lambda: bool(_api_token))
+
+    # ── Chat projects: a named folder with instructions, conversations filed in it (docs/design/chat-projects.md) ──
+    # Owner for everything; a chat-only device sees only the projects its own sessions are in.
+    from prometheus.web.chat_projects_routes import register_chat_projects_routes
+
+    register_chat_projects_routes(
+        app, config=config, conversation_store=_conversation_store, devices=_devices_or_create,
+        is_owner=lambda request: _scope(request).unrestricted,
+        owned_ids=lambda request: _access.owned_ids(_scope(request)),
+        session_exists=lambda sid: session_exists(session_mgr, _conversation_store(), sid),
+    )
+
+    # ── Speech: a reply read aloud through the voice box (docs/design/speech-route.md) ────
+    # The owner's and chat-only devices', like chat (web/route_access.py). The launcher lets the reply holder hear
+    # the bridge's frames (speech_routes.attach_bridge).
+    from prometheus.web.speech_routes import register_speech_routes
+
+    register_speech_routes(app, config=config, devices=_devices, auth_on=lambda: bool(_api_token))
+
+    # ── Git status of a conversation's work folder (capability git/1; contract: Beacon's git-status.md) ────
+    # Read-only, owner only (web/route_access.py); the launcher lets the watcher hear the bridge's frames.
+    from prometheus.web.git_routes import register_git_routes
+
+    register_git_routes(app, config=config, conversation_store=_conversation_store)
 
     # ── Static files (must be last — catch-all) ─────────────────────
 
