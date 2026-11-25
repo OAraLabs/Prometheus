@@ -218,10 +218,10 @@ def test_the_push_does_not_carry_it():
 
 # ── names, and a cut that masking hid ────────────────────────────────────────
 
-def test_a_name_over_the_limit_is_shortened_and_says_so():
+def test_a_name_over_the_limit_is_shortened_with_its_own_marker_and_carries_the_flag():
     served = _served({"a" * 60: "v", "command": "ls"})
-    assert served["arguments_cut"] is True
-    assert "name shortened" in served["arguments"][NOTE_KEY]
+    assert served["arguments_cut"] is True and ("a" * 39 + "…") in served["arguments"]
+    assert NOTE_KEY not in served["arguments"] and served["critical"] is False     # no new line, no new critical reason
     assert _served({"a" * 40: "v"}).get("arguments_cut") is None             # exactly the limit is whole
 
 

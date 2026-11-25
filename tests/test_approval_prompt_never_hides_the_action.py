@@ -28,6 +28,11 @@ def _view(**arguments):
     return redact_arguments(arguments) or {}
 
 
+def _desktop_view(**arguments):
+    """A DESKTOP action's view: it alone leaves the three validated handles out (any other tool is shown them)."""
+    return redact_arguments(arguments, desktop=True) or {}
+
+
 # ── shell syntax is never inside a mask ──────────────────────────────────────
 
 def test_a_query_shape_mask_stops_at_shell_syntax():
@@ -94,10 +99,10 @@ def test_empty_values_are_shown_as_what_they_are():
 
 
 def test_underscore_arguments_are_counted_and_said_but_the_validated_handles_are_not():
-    view = _view(path="/tmp/x", _private="p", _other="q", session="s", snapshot_id="i")
+    view = _desktop_view(path="/tmp/x", _private="p", _other="q", session="s", snapshot_id="i")
     assert "path" in view and "_private" not in view and "session" not in view
     assert NOTE in view and "_private" in view[NOTE] and "_other" in view[NOTE] and "not shown" in view[NOTE]
-    assert NOTE not in _view(path="/tmp/x", session="s", snapshot_id="i", element_token="t")
+    assert NOTE not in _desktop_view(path="/tmp/x", session="s", snapshot_id="i", element_token="t")
 
 
 def test_an_ordinary_call_carries_no_note():
@@ -275,7 +280,7 @@ def test_a_worker_sends_a_bounded_raw_copy_and_the_daemon_renders_it_once():
 
 
 def test_a_handle_with_something_odd_in_it_is_shown_not_dropped():
-    view = _view(command="ls", session="prod-db; rm -rf ~", snapshot_id="s1")
+    view = _desktop_view(command="ls", session="prod-db; rm -rf ~", snapshot_id="s1")
     assert view["session"] == "prod-db; rm -rf ~" and "snapshot_id" not in view
 
 

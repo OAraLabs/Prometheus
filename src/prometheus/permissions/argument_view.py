@@ -236,10 +236,10 @@ def render_arguments(
         if was_cut:
             cut_names.append(label)
         if len(_name_text(name)) > MAX_NAME_CHARS:
-            short_names.append(label)                      # the name itself was shortened: the rest of it is not on screen
+            short_names.append(label)                      # shortened with its own ``…``: the wire flag counts it, the note does not
     if over:
         out[OVERFLOW_KEY] = f"({over} more argument(s) not shown)"
-    note = _note(masked_names, cut_names, hidden_names, over, not_sent, short_names)
+    note = _note(masked_names, cut_names, hidden_names, over, not_sent)
     if note:
         out = {NOTE_KEY: note, **out}
     return RenderedArguments(out or None, bool(hidden_names or cut_names or short_names or over or not_sent))
@@ -432,7 +432,7 @@ def _name_text(name: str) -> str:
 def _name_visible(name: str) -> str:
     """An argument name as one short line of identifier characters. The model chooses names, so a name cannot look like a
     second argument (``x: rm -rf ~; y``) or like the ``⚠`` line, and two names differing by a trailing space differ on
-    screen. One over :data:`MAX_NAME_CHARS` is cut with a ``…`` (and the view's note says so)."""
+    screen. One over :data:`MAX_NAME_CHARS` is cut with a ``…`` (which :class:`RenderedArguments` counts as left out)."""
     text = _name_text(name)
     return text if len(text) <= MAX_NAME_CHARS else text[:MAX_NAME_CHARS - 1] + "…"
 
@@ -446,8 +446,7 @@ def _unique(label: str, taken: dict[str, str]) -> str:
     return candidate
 
 
-def _note(masked: list[str], cut: list[str], hidden: list[str], over: int, not_sent: int = 0,
-          short: list[str] | None = None) -> str:
+def _note(masked: list[str], cut: list[str], hidden: list[str], over: int, not_sent: int = 0) -> str:
     """The one line that says what the view did to the call, or '' when it did nothing."""
     def names(items: list[str]) -> str:
         shown = ", ".join(items[:_NOTE_NAMES])
@@ -458,8 +457,6 @@ def _note(masked: list[str], cut: list[str], hidden: list[str], over: int, not_s
         parts.append(f"masked: {names(masked)}")
     if cut:
         parts.append(f"cut: {names(cut)}")
-    if short:
-        parts.append(f"name shortened: {names(short)}")
     if hidden:
         parts.append(f"not shown: {names(hidden)}")
     if over:
