@@ -326,6 +326,12 @@ def _wire_is_trusted(part: Any) -> bool:
     return bool(getattr(part, "is_trusted", True))
 
 
+#: The longest ``client_msg_id`` ``POST /api/chat/send`` remembers for its send dedupe (after trimming). The id is the
+#: client's own string, and the in-memory table holds 4096 of them, so one device could pin memory with long ones: a longer
+#: id is still dispatched, as always, but is not remembered and never deduplicated. A real id is a UUID (36 characters).
+CLIENT_MSG_ID_MAX = 200
+
+
 def create_app(
     config: dict[str, Any],
     signal_bus: Any | None = None,
@@ -1902,7 +1908,7 @@ def create_app(
         # first await so two requests in flight at once cannot both pass.
         claim = None
         sending: asyncio.Future | None = None
-        if client_msg_id:
+        if client_msg_id and len(client_msg_id) <= CLIENT_MSG_ID_MAX:
             claim = (session_id, client_msg_id)
             while (first := _sending_client_ids.get(claim)) is not None:
                 await asyncio.shield(first)          # never raises: it is only ever given a result
