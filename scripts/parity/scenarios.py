@@ -568,7 +568,7 @@ SCENARIOS: list[Scenario] = [
                "withheld from every request, the 27B's Qwen XML calls read out of its reply "
                "text and executed across rounds, the task's file written",
         files={ws("depot"): {"index.txt": DEPOT_INDEX, "bin-7.txt": DEPOT_BIN}},
-        config={"adapter": {"model_tiers": {"qwen3.8-27b": "full"}}},
+        config={"adapter": {"model_tiers": {"27b": "full"}}},
         steps=[
             {"op": "workspace", "session": "desktop:parity-tierfull", "ws": "depot"},
             {"op": "chat", "session": "desktop:parity-tierfull",
