@@ -589,6 +589,59 @@ class DeviceStore:
             "AND d.revoked_at IS NULL", (device_id,)).fetchone()
         return row is not None
 
+    # ------------------------------------------------------------------
+    # The ORIGIN mark: which voice surface a scoped device's turns run under
+    # ------------------------------------------------------------------
+    #
+    # permissions/origins.py maps the mark to a held capability profile. The mark is the operator's explicit
+    # grant, set only through an operator route (PUT /api/devices/{id}/origin); an unmarked scoped device is
+    # voice_box, the smallest surface. Its own table, created on the FIRST mark like computer_devices.
+
+    def _has_origin_table(self) -> bool:
+        return self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='device_origins'"
+        ).fetchone() is not None
+
+    def set_origin(self, device_id: str, origin: str | None, *, by: str) -> bool:
+        """Mark a LIVE device's voice origin, or clear the mark (None). False for an unknown or revoked id.
+
+        The caller validates the origin name (permissions/origins.py); the store keeps whatever it is given,
+        the same way it keeps a device name. ``by`` names who marked it.
+        """
+        live = self._conn.execute(
+            "SELECT 1 FROM api_devices WHERE id = ? AND revoked_at IS NULL",
+            (device_id,)).fetchone()
+        if live is None:
+            return False
+        if origin is None:
+            if self._has_origin_table():
+                self._conn.execute("DELETE FROM device_origins WHERE device_id = ?", (device_id,))
+                self._conn.commit()
+            return True
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS device_origins (
+              device_id  TEXT PRIMARY KEY,
+              origin     TEXT NOT NULL,
+              marked_at  REAL NOT NULL,
+              marked_by  TEXT NOT NULL
+            );
+        """)
+        self._conn.execute(
+            "INSERT OR REPLACE INTO device_origins (device_id, origin, marked_at, marked_by) "
+            "VALUES (?, ?, ?, ?)", (device_id, origin, time.time(), by))
+        self._conn.commit()
+        return True
+
+    def device_origin(self, device_id: str) -> str | None:
+        """The LIVE device's origin mark, or None. A revoked device has none, whatever its mark says."""
+        if not self._has_origin_table():
+            return None
+        row = self._conn.execute(
+            "SELECT o.origin FROM device_origins o JOIN api_devices d "
+            "ON d.id = o.device_id WHERE o.device_id = ? AND d.revoked_at IS NULL",
+            (device_id,)).fetchone()
+        return str(row["origin"]) if row is not None else None
+
     def computer_device_ids(self) -> set[str]:
         if not self._has_computer_table():
             return set()

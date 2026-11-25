@@ -1276,7 +1276,8 @@ class WebSocketBridge:
 
     async def dispatch_user_message(
         self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent",
-        tool_choice: object | None = None, blocks: list[Any] | None = None, operator: bool = True
+        tool_choice: object | None = None, blocks: list[Any] | None = None, operator: bool = True,
+        origin: str | None = None,
     ) -> None:
         """Public dispatch entry point — kicks off the same flow as a WS-borne
         ``send_message`` command.
@@ -1298,10 +1299,13 @@ class WebSocketBridge:
         a bad reference is a 4xx to the caller, not a turn that runs short.
         """
         # ``blocks`` rides only when present — duck-typed handler fakes predate it.
+        # ``origin`` likewise: the credential-derived voice origin (permissions/origins.py),
+        # set by the route from the authenticated identity, never by the caller's body.
         await self._handle_send_message(
             session_id, content, client_msg_id=client_msg_id, mode=mode,
             tool_choice=tool_choice, **({"blocks": blocks} if blocks else {}),
             **({} if operator else {"operator": False}),
+            **({"origin": origin} if origin else {}),
         )
 
     async def resolve_references(self, session_id: str, refs: list[Any]) -> list[Any]:
@@ -1496,7 +1500,8 @@ class WebSocketBridge:
 
     async def _handle_send_message(
         self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent",
-        tool_choice: object | None = None, blocks: list[Any] | None = None, operator: bool = True
+        tool_choice: object | None = None, blocks: list[Any] | None = None, operator: bool = True,
+        origin: str | None = None,
     ) -> None:
         """Process a user message — add to session and run agent loop if context available.
 
@@ -1663,7 +1668,8 @@ class WebSocketBridge:
         # If we have a loop context, run the agent
         if self.loop_context:
             asyncio.create_task(self._run_agent(session_id, session, mode=mode, tool_choice=tool_choice,
-                                                **({} if operator else {"operator": False})))
+                                                **({} if operator else {"operator": False}),
+                                                **({"origin": origin} if origin else {})))
 
     async def _broadcast_command_reply(
         self,
@@ -1780,7 +1786,7 @@ class WebSocketBridge:
 
     async def _run_agent(
         self, session_id: str, session: Any, mode: str = "agent", tool_choice: object | None = None,
-        raise_on_error: bool = False, operator: bool = True,
+        raise_on_error: bool = False, operator: bool = True, origin: str | None = None,
     ) -> tuple[str, Any]:
         """Run the agent loop and stream results over WebSocket. `mode` ('agent'|'chat')
         is threaded as a per-call run_loop arg — NEVER stored on the shared loop_context —
@@ -1864,7 +1870,7 @@ class WebSocketBridge:
                     return await self._run_agent_locked(
                         session_id, session, mode=mode, tool_choice=tool_choice,
                         raise_on_error=raise_on_error, msg_id=msg_id,
-                        progress=progress, operator=operator,
+                        progress=progress, operator=operator, origin=origin,
                     )
                 finally:
                     COMPACTION_REPORTER.reset(reporter)
@@ -1896,7 +1902,7 @@ class WebSocketBridge:
                 "payload": {"state": "idle", "session_id": session_id},
             })
 
-    def _turn_context(self, session_id: str, operator: bool) -> Any:
+    def _turn_context(self, session_id: str, operator: bool, origin: str | None = None) -> Any:
         """The loop context a turn runs on.
 
         The shared context's session id is the literal ``"web"``, which the permission gate reads as the owner at
@@ -1906,15 +1912,31 @@ class WebSocketBridge:
         (the message tool's destination check) see the device's conversation, not ``"web"``. A device cannot
         claim an id the gate would read as a person present (web/session_scope.py), so the copy's id is never
         that. Per turn and never stored: concurrent turns cannot cross.
+
+        A credential-derived VOICE origin (permissions/origins.py) additionally holds the run to its capability
+        profile: the resolver the loop already reads returns the origin's held profile for this session, so the
+        advertised schema AND the call path are cut to it, with no fallback that widens it. The origin rides the
+        per-run copy only — never the shared context, never a request body.
         """
-        if operator or self.loop_context is None:
+        if self.loop_context is None:
+            return self.loop_context
+        if origin:
+            from prometheus.permissions.origins import capability_profile
+
+            profile = capability_profile(origin)
+            if profile is not None:
+                return dataclasses.replace(
+                    self.loop_context, session_id=session_id,
+                    profile_resolver=lambda *a, _p=profile: _p,
+                )
+        if operator:
             return self.loop_context
         return dataclasses.replace(self.loop_context, session_id=session_id)
 
     async def _run_agent_locked(
         self, session_id: str, session: Any, *, mode: str,
         tool_choice: object | None, raise_on_error: bool,
-        msg_id: str, progress: dict, operator: bool = True,
+        msg_id: str, progress: dict, operator: bool = True, origin: str | None = None,
     ) -> tuple[str, Any]:
         """Serialized core of :meth:`_run_agent` (holds the session's turn
         lock — same split as the telegram gateway's ``_run_agent_turn`` /
@@ -1940,7 +1962,7 @@ class WebSocketBridge:
             messages = session.get_messages()
             original_len = len(messages)
             async for event, _usage in run_loop(
-                self._turn_context(session_id, operator), messages, mode=mode, session_id=session_id,
+                self._turn_context(session_id, operator, origin), messages, mode=mode, session_id=session_id,
                 tool_choice=tool_choice, surface="beacon",
             ):
                 if _usage is not None:

@@ -61,6 +61,7 @@ EXPECTED_SCOPED_ALLOWED = {
     # speech, with chat's limits: a session's reply only for a session it owns (the session path guard)
     ("GET", "/api/speech"),
     ("POST", "/api/speech/transcribe"),
+    ("POST", "/api/speech/event"),
     ("POST", "/api/speech/speak"),
     ("GET", "/api/sessions/{session_id}/speech"),
     # the one desktop route open to every valid token: a stop can only end a task
