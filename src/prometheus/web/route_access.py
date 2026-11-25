@@ -71,6 +71,8 @@ SCOPED_ALLOWED: frozenset[tuple[str, str]] = frozenset({
     ("DELETE", "/api/devices/{device_id}/push"),
     ("POST", "/api/devices/{device_id}/activity"),        # for a session it owns
     ("DELETE", "/api/devices/{device_id}/activity"),
+    ("PUT", "/api/devices/{device_id}/activity-start"),   # its own push-to-start token (another id is refused)
+    ("DELETE", "/api/devices/{device_id}/activity-start"),
     # chat
     ("POST", "/api/chat"),
     ("POST", "/api/chat/send"),

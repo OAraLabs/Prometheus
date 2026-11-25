@@ -37,6 +37,8 @@ EXPECTED_SCOPED_ALLOWED = {
     ("DELETE", "/api/devices/{device_id}/push"),
     ("POST", "/api/devices/{device_id}/activity"),
     ("DELETE", "/api/devices/{device_id}/activity"),
+    ("PUT", "/api/devices/{device_id}/activity-start"),
+    ("DELETE", "/api/devices/{device_id}/activity-start"),
     # chat
     ("POST", "/api/chat"),
     ("POST", "/api/chat/send"),
