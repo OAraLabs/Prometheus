@@ -320,3 +320,103 @@ def test_no_daemon_module_imports_the_acp_core():
         if "from prometheus.acp" in text or "import prometheus.acp" in text:
             offenders.append(str(py.relative_to(src)))
     assert offenders == [], f"daemon modules import the ACP core unconditionally: {offenders}"
+
+
+# ── review fixes: key-length boundary, atomicity, rowid survival ────────────
+
+
+@pytest.mark.parametrize("n", [120, 121, 128])
+def test_key_length_boundary_retry_is_idempotent_or_refused(store, n):
+    """The claim is stored WITH the 8-char 'acp-key:' prefix in a 128-char
+    column. A 120-char key fits (128 stored) and a retry must return the first
+    messageId; 121 and 128 must be REFUSED by name — never accepted and then
+    silently dropped by the store's length guard (review finding 1)."""
+    m = SessionMap(store)
+    sid = m.new_session({"cwd": "/tmp"}).session_id
+    key = "k" * n
+    params = {"sessionId": sid, "prompt": [{"type": "text", "text": "hi"}], "idempotencyKey": key}
+    if n <= 120:
+        first = m.insert_prompt(params)
+        again = m.insert_prompt(params)
+        assert again.message_id == first.message_id
+        assert len(store.get_all_messages(sid)) == 1
+        # the claim really is stored (not silently dropped)
+        assert f"acp-key:{key}" in store.get_message_client_ids(sid).values()
+    else:
+        with pytest.raises(FrameError) as ei:
+            m.insert_prompt(params)
+        assert ei.value.code == -32602
+        assert store.get_all_messages(sid) == []
+
+
+def test_concurrent_same_key_prompts_insert_once(store):
+    """Two threads, one key: the lookup-insert-record unit is serialized by
+    the store transaction, so exactly one row exists and both callers get the
+    same messageId (review finding 2)."""
+    import threading
+
+    m = SessionMap(store)
+    sid = m.new_session({"cwd": "/tmp"}).session_id
+    params = {"sessionId": sid, "prompt": [{"type": "text", "text": "hi"}], "idempotencyKey": "race"}
+    results: list = []
+    barrier = threading.Barrier(2)
+
+    def send():
+        barrier.wait()
+        results.append(m.insert_prompt(params).message_id)
+
+    threads = [threading.Thread(target=send) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    assert len(results) == 2
+    assert results[0] == results[1]
+    assert len(store.get_all_messages(sid)) == 1
+
+
+def test_crash_between_insert_and_record_rolls_back(store):
+    """A failure of the claim record must not leave the inserted row behind:
+    the whole unit rolls back, so a retry inserts cleanly (review finding 2)."""
+    m = SessionMap(store)
+    sid = m.new_session({"cwd": "/tmp"}).session_id
+    params = {"sessionId": sid, "prompt": [{"type": "text", "text": "hi"}], "idempotencyKey": "crash"}
+
+    def boom(*a, **k):
+        raise RuntimeError("simulated crash after insert, before record")
+
+    orig = store.set_message_client_id
+    store.set_message_client_id = boom
+    try:
+        with pytest.raises(RuntimeError):
+            m.insert_prompt(params)
+    finally:
+        store.set_message_client_id = orig
+    assert store.get_all_messages(sid) == []  # insert rolled back with the unit
+    # the retry now inserts exactly once
+    first = m.insert_prompt(params)
+    again = m.insert_prompt(params)
+    assert again.message_id == first.message_id
+    assert len(store.get_all_messages(sid)) == 1
+
+
+def test_purge_vacuum_preserves_other_sessions_rowids(store):
+    """messageId is str(rowid) and lcm_messages has no INTEGER PRIMARY KEY;
+    the purge path runs VACUUM. SQLite only PROMISES rowid stability across
+    VACUUM for INTEGER PRIMARY KEY tables — it holds in practice, and this
+    test runs the REAL purge path so a SQLite change cannot silently break
+    ACP message ids (session_forks.origin_rowid and FTS rely on the same
+    property) (review finding 3)."""
+    m = SessionMap(store)
+    keep = m.new_session({"cwd": "/tmp"}).session_id
+    drop = m.new_session({"cwd": "/tmp"}).session_id
+    ids = {}
+    for sid in (keep, drop):
+        for i in range(3):
+            ins = m.insert_prompt({"sessionId": sid, "prompt": [{"type": "text", "text": f"m{i}"}]})
+            ids.setdefault(sid, []).append(ins.message_id)
+    before = {p.row_id: p.content for p in store.messages_after_id(0, session_id=keep)}
+    store.purge_session(drop)  # the real path: DELETE + fts cleanup + VACUUM
+    after = {p.row_id: p.content for p in store.messages_after_id(0, session_id=keep)}
+    assert after == before, "VACUUM renumbered surviving rows — ACP messageIds would dangle"
+    assert [str(r) for r in after] == ids[keep]

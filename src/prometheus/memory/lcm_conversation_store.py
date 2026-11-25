@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
 import time
 from collections.abc import Iterable
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -108,7 +110,66 @@ class LCMConversationStore:
         self._db_path = db_path if db_path is not None else get_lcm_db_path()
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # Re-entrant: the connection is shared across threads (check_same_thread
+        # is off), and a multi-statement unit of work — check, insert, record —
+        # must hold ONE write transaction against every other writer, including
+        # another thread holding this same store object. Ordinary single-method
+        # callers are unaffected: sqlite3 already serializes them on the
+        # connection, and the lock is only taken by `transaction()` below.
+        self._tx_lock = threading.RLock()
+        self._tx_local = threading.local()
         self._apply_schema()
+
+    @contextmanager
+    def transaction(self):
+        """One ALL-OR-NOTHING write unit around a block of store calls.
+
+        For callers whose unit of work spans several methods (a lookup, an
+        insert, a side-table record) and must not interleave with another
+        writer NOR survive a crash half-done:
+
+        - the re-entrant lock excludes other threads holding THIS store
+          object (the connection is shared, check_same_thread off), so two
+          threads cannot both pass a "not seen" lookup before either inserts;
+        - BEGIN IMMEDIATE takes the database write lock up front, so another
+          CONNECTION to the file waits rather than slipping between steps;
+        - while the block runs, the store's own ``commit()`` calls are
+          SUPPRESSED (they would otherwise end the explicit transaction —
+          sqlite3's commit is unconditional). The block's writes land
+          together at the final COMMIT, or not at all: any exception rolls
+          the whole unit back.
+
+        Suppression is per-thread and re-entrant: a nested transaction()
+        joins the outer unit; single-method callers on any thread commit
+        exactly as before. A different thread calling a store method while
+        a block holds the lock waits on the lock only if it also uses
+        transaction(); a bare method call commits into the open transaction
+        and is part of the unit — which is the point: one writer at a time.
+        """
+        with self._tx_lock:
+            outermost = getattr(self._tx_local, "depth", 0) == 0
+            if outermost:
+                self._conn.execute("BEGIN IMMEDIATE")
+            self._tx_local.depth = getattr(self._tx_local, "depth", 0) + 1
+            try:
+                yield self._conn
+            except BaseException:
+                self._tx_local.depth -= 1
+                if outermost:
+                    self._conn.rollback()
+                raise
+            else:
+                self._tx_local.depth -= 1
+                if outermost:
+                    self._conn.commit()
+
+    def _commit(self) -> None:
+        """The store's commit point. A no-op while a transaction() block is
+        open on this thread — the block's final COMMIT lands every write
+        together. Everywhere else this is exactly ``self._conn.commit()``."""
+        if getattr(self._tx_local, "depth", 0) > 0:
+            return
+        self._conn.commit()
 
     # ------------------------------------------------------------------
     # Schema
@@ -458,7 +519,7 @@ class LCMConversationStore:
                 "INSERT OR REPLACE INTO lcm_messages_fts (rowid, content) VALUES (?, ?)",
                 (msg.row_id, content),
             )
-        self._conn.commit()
+        self._commit()
         if collision is not None:
             self._record_turn_index_collision(
                 msg.session_id, requested, msg.turn_index, collision
@@ -599,7 +660,7 @@ class LCMConversationStore:
             f"UPDATE lcm_messages SET compacted = 1 WHERE id IN ({placeholders})",
             message_ids,
         )
-        self._conn.commit()
+        self._commit()
         return cur.rowcount
 
     def search(
@@ -1163,7 +1224,7 @@ class LCMConversationStore:
                 self._conn.execute(
                     "INSERT INTO lcm_summaries_fts (lcm_summaries_fts) VALUES ('optimize')"
                 )
-            self._conn.commit()
+            self._commit()
         finally:
             self._conn.execute(f"PRAGMA secure_delete = {'ON' if prior else 'OFF'}")
         # Reclaim the freed pages. Without this the overwritten space is still
@@ -1226,7 +1287,7 @@ class LCMConversationStore:
             " VALUES (?, ?)",
             (session_id, time.time()),
         )
-        self._conn.commit()
+        self._commit()
 
     # ------------------------------------------------------------------
     # Session titles (GRAFT-MOBILE-BRIDGE 7)
@@ -1250,7 +1311,7 @@ class LCMConversationStore:
                 " VALUES (?, ?, ?)",
                 (session_id, clean, time.time()),
             )
-        self._conn.commit()
+        self._commit()
 
     def set_session_pinned(self, session_id: str, pinned: bool) -> None:
         """Pin or unpin a session. Unpinning DELETES the row.
@@ -1269,7 +1330,7 @@ class LCMConversationStore:
             self._conn.execute(
                 "DELETE FROM session_pins WHERE session_id = ?", (session_id,)
             )
-        self._conn.commit()
+        self._commit()
 
     def is_session_pinned(self, session_id: str) -> bool:
         """True when a pin row exists for this session."""
@@ -1328,7 +1389,7 @@ class LCMConversationStore:
             " (session_id, origin_session, origin_rowid, created_at) VALUES (?, ?, ?, ?)",
             (new_session_id, origin_session, int(at_rowid), created),
         )
-        self._conn.commit()
+        self._commit()
         return {
             "session_id": new_session_id,
             "origin_session": origin_session,
@@ -1384,7 +1445,7 @@ class LCMConversationStore:
                 " VALUES (?, ?, ?)",
                 (session_id, clean, time.time()),
             )
-        self._conn.commit()
+        self._commit()
 
     def set_session_workspace(self, session_id: str, path: str, *, set_by: str = "rest") -> None:
         """Bind a session to a working directory. Blank CLEARS the binding.
@@ -1411,7 +1472,7 @@ class LCMConversationStore:
                 " VALUES (?, ?, ?, ?)",
                 (session_id, clean, set_by, time.time()),
             )
-        self._conn.commit()
+        self._commit()
 
     def set_session_backend(self, session_id: str, key: str | None, *, set_by: str = "router") -> None:
         """Remember which local backend a session is pointed at (`/4090`,
@@ -1428,7 +1489,7 @@ class LCMConversationStore:
                 " VALUES (?, ?, ?, ?)",
                 (session_id, clean, set_by, time.time()),
             )
-        self._conn.commit()
+        self._commit()
 
     def get_session_backend(self, session_id: str) -> str | None:
         row = self._conn.execute(
@@ -1491,7 +1552,7 @@ class LCMConversationStore:
             " (session_id, row_id, client_msg_id, created_at) VALUES (?, ?, ?, ?)",
             (session_id, int(row_id), cid, time.time()),
         )
-        self._conn.commit()
+        self._commit()
 
     def has_message_client_id(self, session_id: str, client_msg_id: str | None) -> bool:
         """Whether a message the client named ``client_msg_id`` is already stored in ``session_id``.

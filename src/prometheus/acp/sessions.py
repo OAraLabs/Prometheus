@@ -43,11 +43,16 @@ from prometheus.acp.framing import INVALID_PARAMS, FrameError
 SURFACE = "acp"
 
 #: Schema IdempotencyKey: opaque, 1..255 chars, session-scoped. The daemon's
-#: client-id column caps at 128 (memory/lcm_conversation_store.CLIENT_MSG_ID_MAX);
-#: rather than truncate (which would merge distinct submissions), a longer key
-#: is refused by name at the edge.
+#: client-id column caps at 128 (memory/lcm_conversation_store.CLIENT_MSG_ID_MAX)
+#: and the claim is stored WITH the "acp-key:" prefix, so the key itself must
+#: fit the cap MINUS the prefix. A longer key is refused by name at the edge —
+#: never truncated (truncation would merge distinct submissions), and never
+#: accepted-then-silently-dropped by the store's own length guard. Widening the
+#: storage is a separate migration (design doc D15), before the agent endpoint.
 IDEMPOTENCY_KEY_MAX = 255
+_CLAIM_PREFIX = "acp-key:"
 _STORE_CLIENT_ID_MAX = 128
+_KEY_MAX = _STORE_CLIENT_ID_MAX - len(_CLAIM_PREFIX)
 
 
 def new_session_id() -> str:
@@ -135,7 +140,10 @@ class SessionMap:
         A repeat of (sessionId, idempotencyKey) returns the FIRST insertion's
         message id and inserts nothing — the schema's retry contract. The
         durable claim lives in ``message_client_ids`` under the key
-        ``acp-key:<idempotencyKey>``, so a restart cannot double-insert.
+        ``acp-key:<idempotencyKey>``. Lookup, insert and claim record run in
+        ONE store transaction: two concurrent prompts with the same key
+        cannot both pass the lookup, and a crash mid-unit rolls back the
+        insert with it — a restart cannot double-insert.
         """
         try:
             req = types.PromptRequest.model_validate(params)
@@ -150,20 +158,23 @@ class SessionMap:
         if key is not None:
             if not (1 <= len(key) <= IDEMPOTENCY_KEY_MAX):
                 raise FrameError(INVALID_PARAMS, "idempotencyKey must be 1..255 characters")
-            if len(key) > _STORE_CLIENT_ID_MAX:
+            if len(key) > _KEY_MAX:
                 raise FrameError(
                     INVALID_PARAMS,
-                    f"idempotencyKey longer than {_STORE_CLIENT_ID_MAX} characters is not supported "
-                    "by this agent (refused, never truncated)",
+                    f"idempotencyKey longer than {_KEY_MAX} characters is not supported "
+                    f"by this agent (the stored claim adds a {len(_CLAIM_PREFIX)}-char prefix "
+                    f"to a {_STORE_CLIENT_ID_MAX}-char column; refused, never truncated)",
                 )
-            stored = self.store.get_message_client_ids(session_id)
-            for row_id, cid in stored.items():
-                if cid == f"acp-key:{key}":
-                    return PromptInsertion(session_id, str(row_id), key)
         text = "\n".join(b.text for b in req.prompt if getattr(b, "text", None))
-        row_id = self._insert_user_row(session_id, text)
-        if key is not None:
-            self.store.set_message_client_id(session_id, row_id, f"acp-key:{key}")
+        with self.store.transaction():
+            if key is not None:
+                stored = self.store.get_message_client_ids(session_id)
+                for row_id, cid in stored.items():
+                    if cid == f"{_CLAIM_PREFIX}{key}":
+                        return PromptInsertion(session_id, str(row_id), key)
+            row_id = self._insert_user_row(session_id, text)
+            if key is not None:
+                self.store.set_message_client_id(session_id, row_id, f"{_CLAIM_PREFIX}{key}")
         return PromptInsertion(session_id, str(row_id), key)
 
     def _insert_user_row(self, session_id: str, text: str) -> int:

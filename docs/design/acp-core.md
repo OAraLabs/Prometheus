@@ -80,8 +80,13 @@ restart needs no mapping table.
   completion is a state update, per the schema's prompt lifecycle.
 - Idempotency: `(sessionId, idempotencyKey)` claims live in the store's
   `message_client_ids` side table under `acp-key:<key>` — the same durable
-  mechanism the REST send path uses. A retry after a restart returns the first
-  insertion's message id and inserts nothing.
+  mechanism the REST send path uses. Lookup, insert and claim record run in
+  ONE store transaction (`LCMConversationStore.transaction()`: a re-entrant
+  lock plus BEGIN IMMEDIATE, with the store's own commits suppressed until
+  the unit ends), so two concurrent prompts with the same key cannot both
+  pass the lookup, and a crash mid-unit rolls the insert back with it. A
+  retry after a restart returns the first insertion's message id and inserts
+  nothing.
 - `session/resume` replays history keyed by DURABLE rowid (never positional
   ids), ordered by prompt position, ending with the `replay_complete`
   SessionUpdate. The caller holds live updates for the session until the marker
@@ -92,10 +97,19 @@ restart needs no mapping table.
 ### Refusals (fail closed)
 
 - Foreign session ids (anything not `acp:`) → `-32002` session not found.
-- `idempotencyKey` longer than 128 chars → `-32602`, refused BY NAME. The schema
-  allows 255; the daemon's client-id column caps at 128. Truncating would merge
-  distinct submissions, so the edge refuses the overlong key instead. Widening
-  the column is a separate, reviewed change.
+- `idempotencyKey` longer than **120** chars → `-32602`, refused BY NAME. The
+  schema allows 255; the stored claim is `acp-key:` + key in the daemon's
+  128-char client-id column, so the KEY must fit 128 − 8 = 120. Checking the
+  key against 128 instead would accept 121–128-char keys whose claim the
+  store then silently drops — idempotency lost without a word. Truncating
+  would merge distinct submissions, so the edge refuses by name. Widening
+  the storage (263 chars, or a dedicated column) is a separate migration PR,
+  before the agent endpoint; a test pins the 120/121/128 boundary.
+- `messageId` is the durable SQLite rowid. `lcm_messages` has no INTEGER
+  PRIMARY KEY, so rowid stability across the purge path's VACUUM is a
+  practical property, not a promised one; a test runs the REAL purge and
+  asserts surviving sessions' rowids are unchanged, so a SQLite change
+  cannot silently break ACP message ids.
 - Malformed params → `-32602` with the validation error; never a partial insert.
 
 ## 4. Fixtures
