@@ -58,6 +58,7 @@ from prometheus.context.prompt_assembler import (
 from prometheus.context.system_prompt import (
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
     rewrite_model_identity,
+    rewrite_working_directory,
 )
 from prometheus.engine import pause as _pause  # pause everything (engine/pause.py)
 from prometheus.engine.fallback import stream_round_with_fallback
@@ -2074,6 +2075,13 @@ async def _run_loop(
     run_cwd: Path = session_workspace or context.cwd
     run_workspace_roots: tuple[Path, ...] | None = (session_workspace,) if session_workspace else None
     _RUN_PATHS.set((run_cwd, run_workspace_roots))
+    if session_workspace is not None and _hold is None:
+        # The Environment section's "- Working directory:" line was written at
+        # boot with the DAEMON's cwd (under launchd: "/"). Item W moves the
+        # run's cwd to the session workspace; the line must follow, or the
+        # prompt states a working directory the tools do not run in — the same
+        # stale-statement defect the "- Model:" rewrite exists to close.
+        active_system_prompt = rewrite_working_directory(active_system_prompt, session_workspace)
     if session_workspace is not None and context.project_prompt_builder is not None and _hold is None:
         # Swap the boot-time project section for the workspace's own. Exact
         # substring: both texts come from the same builder, so no parsing.

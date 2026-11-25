@@ -525,7 +525,7 @@ _TC = ["tool_name", "success", "raw_model_output", "parsed_tool_call"]
 NATIVE = _tel(tool_calls=(_TC, [["code_run", 1, "", _RUN]]))
 FROM_TEXT_XML = _tel(tool_calls=(_TC, [["code_run", 1, _XML_REPLY, _RUN]]))
 FROM_TEXT_JSON = _tel(tool_calls=(_TC, [["code_run", 1, '{"name": "code_run", "arguments": {"command": "python test_calc.py"}}', _RUN]]))
-SERVED = "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"
+SERVED = "/models-root/.prometheus/models/saluki/Underdog-Saluki-27B-1.0-IQ2-mix.gguf"
 _TOOLS = [{"type": "function", "function": {"name": "code_run", "parameters": {}}}]
 _TASK = {"role": "user", "content": "Begin the coding task. Repository root: /x. Start by exploring the relevant files."}
 CODE_REQ = [{"model": SERVED, "tools": _TOOLS, "tool_choice": "auto",
@@ -706,9 +706,9 @@ def test_the_tier_full_scenario_pins_the_served_model_to_full():
     from parity.runner import HARNESS_OVERRIDES
 
     tiers = BY_NAME["tier_full"].config["adapter"]["model_tiers"]
-    assert tiers == {"qwen3.8-27b": "full"}
-    assert "qwen3.8-27b" in SERVED.lower()
-    assert "qwen3.8-27b" not in HARNESS_OVERRIDES["backends"]["alt"]["model"].lower()
+    assert tiers == {"27b": "full"}
+    assert "27b" in SERVED.lower()
+    assert "qwen2.5:7b" in HARNESS_OVERRIDES["backends"]["alt"]["model"].lower()
 
 
 @pytest.mark.parametrize("after_undo", [UNDO_LEFT_A_CHANGE, UNDO_LEFT_A_FILE],
