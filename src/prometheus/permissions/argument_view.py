@@ -56,6 +56,7 @@ import json
 import math
 import os
 import unicodedata
+from dataclasses import dataclass
 from typing import Any
 
 from prometheus.permissions.audit import AuditLogger
@@ -145,6 +146,19 @@ _NOISE_KEYS: frozenset[str] = frozenset({
 _NOTE_NAMES = 4
 
 
+@dataclass(frozen=True)
+class RenderedArguments:
+    """What :func:`render_arguments` made of a call: the view every surface shows, and whether it left anything out."""
+
+    view: dict[str, str] | None
+    #: Something a person would want to see was NOT sent: an argument named ``_x`` left out, a value cut, more arguments
+    #: than fit (the overflow row), or a worker's arguments not all sent. NOT: one of the three validated desktop handles
+    #: left out, an empty value (shown), or a value only masked (it is there, and says so). The ``arguments_cut`` of a
+    #: served approval request is this (``ApprovalQueue.serialize_pending``); ``critical`` reads the broader
+    #: :func:`view_was_cut`, which counts a mask too.
+    left_out: bool
+
+
 def redact_arguments(
     arguments: dict[str, Any] | None,
     *,
@@ -152,9 +166,20 @@ def redact_arguments(
     max_total: int = MAX_TOTAL_CHARS,
     wire: bool = False,
 ) -> dict[str, str] | None:
+    """The view :func:`render_arguments` makes of *arguments* (see there)."""
+    return render_arguments(arguments, max_value=max_value, max_total=max_total, wire=wire).view
+
+
+def render_arguments(
+    arguments: dict[str, Any] | None,
+    *,
+    max_value: int = MAX_VALUE_CHARS,
+    max_total: int = MAX_TOTAL_CHARS,
+    wire: bool = False,
+) -> RenderedArguments:
     """Render tool arguments for human consent: redacted, truncated, ordered, and honest about what it did.
 
-    Returns ``None`` when the call has no arguments at all. Otherwise the first entry is the ``⚠`` line when anything was
+    The view is ``None`` when the call has no arguments at all. Otherwise its first entry is the ``⚠`` line when anything was
     masked, cut or left out (see :data:`NOTE_KEY`); every other entry is one argument as one visible line. Every argument
     is shown (up to :data:`MAX_ARGS_SHOWN`): *max_total* is shared out so that a short value leaves its room to a long one
     and no argument gets less than :data:`MIN_VALUE_SHARE` characters, so padding a call with junk arguments cannot push
@@ -164,7 +189,7 @@ def redact_arguments(
     a line of the ``⚠`` note, and is not an argument.
     """
     if not arguments:
-        return None
+        return RenderedArguments(None, False)
 
     not_sent = 0
     shown_keys: list[tuple[str, Any]] = []
@@ -207,7 +232,7 @@ def redact_arguments(
     note = _note(masked_names, cut_names, hidden_names, over, not_sent)
     if note:
         out = {NOTE_KEY: note, **out}
-    return out or None
+    return RenderedArguments(out or None, bool(hidden_names or cut_names or over or not_sent))
 
 
 def _shares(lengths: list[int], total: int, cap: int) -> list[int]:
