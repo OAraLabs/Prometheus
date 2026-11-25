@@ -243,3 +243,44 @@ def test_the_operator_can_still_send_after_a_device(tmp_path):
     sid = world.device_session("a")
     ok = world.call("op", "POST", "/api/chat/send", json={"session_id": sid, "message": "z", "client_msg_id": "op-1"})
     assert ok.status_code == 200 and GLOBAL
+
+
+# ── a client_msg_id is a short name: it is bounded ───────────────────────────
+
+def test_an_id_of_the_most_allowed_characters_is_accepted_and_deduped():
+    from prometheus.memory.lcm_conversation_store import CLIENT_MSG_ID_MAX
+
+    client, bridge = _client()
+    cid = "x" * CLIENT_MSG_ID_MAX
+    assert _send(client, cid=cid).status_code == 200
+    assert _send(client, cid=cid).json().get("duplicate") is True and len(bridge.calls) == 1
+
+
+def test_a_longer_id_is_refused_with_400_and_claims_nothing():
+    """The in-memory table holds one entry per id for the life of the daemon (bounded in COUNT, not in size), so an id
+    can be no more than a short name. A refused request dispatches nothing and remembers nothing."""
+    from prometheus.memory.lcm_conversation_store import CLIENT_MSG_ID_MAX
+
+    client, bridge = _client()
+    r = _send(client, cid="x" * (CLIENT_MSG_ID_MAX + 1))
+    assert r.status_code == 400 and "client_msg_id" in r.json()["error"] and bridge.calls == []
+    r = _send(client, cid="y" * 100_000)
+    assert r.status_code == 400 and bridge.calls == []
+
+
+def test_the_length_is_counted_after_trimming():
+    from prometheus.memory.lcm_conversation_store import CLIENT_MSG_ID_MAX
+
+    client, bridge = _client()
+    assert _send(client, cid="  " + "x" * CLIENT_MSG_ID_MAX + "  ").status_code == 200 and len(bridge.calls) == 1
+
+
+def test_the_store_records_and_answers_only_for_an_id_within_the_bound(tmp_path):
+    from prometheus.memory.lcm_conversation_store import CLIENT_MSG_ID_MAX
+
+    store = LCMConversationStore(tmp_path / "lcm.db")
+    store.set_message_client_id("s1", 1, "x" * CLIENT_MSG_ID_MAX)
+    store.set_message_client_id("s1", 2, "y" * (CLIENT_MSG_ID_MAX + 1))
+    assert store.has_message_client_id("s1", "x" * CLIENT_MSG_ID_MAX)
+    assert not store.has_message_client_id("s1", "y" * (CLIENT_MSG_ID_MAX + 1))
+    assert store.get_message_client_ids("s1") == {1: "x" * CLIENT_MSG_ID_MAX}

@@ -1846,6 +1846,10 @@ def create_app(
 
         idempotency_key = (body.get("idempotency_key") or "").strip() or _uuid.uuid4().hex
         client_msg_id = (body.get("client_msg_id") or "").strip() or None
+        from prometheus.memory.lcm_conversation_store import CLIENT_MSG_ID_MAX as _CID_MAX
+        if client_msg_id and len(client_msg_id) > _CID_MAX:
+            return JSONResponse(status_code=400, content={
+                "error": f"client_msg_id is longer than {_CID_MAX} characters", "kind": "bad_request"})
         mode = body.get("mode") or "agent"  # absent → agent default (never an error)
         if mode not in ("agent", "chat"):
             return JSONResponse(status_code=400, content={"error": f"invalid mode {mode!r} — expected 'agent' or 'chat'"})

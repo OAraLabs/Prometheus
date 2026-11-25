@@ -824,6 +824,18 @@ class WebSocketBridge:
             client_msg_id = payload.get("client_msg_id")
             if not isinstance(client_msg_id, str):
                 client_msg_id = None
+            from prometheus.memory.lcm_conversation_store import CLIENT_MSG_ID_MAX
+            if client_msg_id is not None and len(client_msg_id.strip()) > CLIENT_MSG_ID_MAX:
+                await self._send_one(websocket, {
+                    "type": "error",
+                    "timestamp": time.time(),
+                    "payload": {
+                        "session_id": session_id,
+                        "message": f"client_msg_id is longer than {CLIENT_MSG_ID_MAX} characters",
+                        "kind": "bad_request",
+                    },
+                })
+                return
             mode = payload.get("mode") or "agent"  # absent → agent default (never an error)
             if mode not in ("agent", "chat"):
                 await self._send_one(websocket, {

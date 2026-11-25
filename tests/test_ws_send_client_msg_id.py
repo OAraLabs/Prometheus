@@ -113,3 +113,26 @@ async def test_rest_dispatch_path_is_unchanged():
     bridge, rec = _bridge()
     await bridge.dispatch_user_message("ios:t4", "hello", client_msg_id="rest-77")
     assert rec.user_echo()["client_msg_id"] == "rest-77"
+
+
+@pytest.mark.asyncio
+async def test_ws_send_refuses_a_client_msg_id_longer_than_the_most_allowed_and_sends_nothing():
+    from prometheus.memory.lcm_conversation_store import CLIENT_MSG_ID_MAX
+
+    bridge, rec = _bridge()
+    await bridge._handle_client_message(rec, _send_cmd({
+        "session_id": "ios:t1", "content": "hello", "client_msg_id": "x" * (CLIENT_MSG_ID_MAX + 1),
+    }))
+    assert [f["type"] for f in rec.frames] == ["error"]
+    assert rec.frames[0]["payload"]["kind"] == "bad_request" and "client_msg_id" in rec.frames[0]["payload"]["message"]
+    assert not any(f["type"] == "chat_message" for f in rec.frames)
+
+
+@pytest.mark.asyncio
+async def test_ws_send_accepts_the_longest_allowed_client_msg_id_and_echoes_it():
+    from prometheus.memory.lcm_conversation_store import CLIENT_MSG_ID_MAX
+
+    bridge, rec = _bridge()
+    cid = "x" * CLIENT_MSG_ID_MAX
+    await bridge._handle_client_message(rec, _send_cmd({"session_id": "ios:t1", "content": "hello", "client_msg_id": cid}))
+    assert rec.user_echo()["client_msg_id"] == cid
