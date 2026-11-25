@@ -136,3 +136,11 @@ async def test_ws_send_accepts_the_longest_allowed_client_msg_id_and_echoes_it()
     cid = "x" * CLIENT_MSG_ID_MAX
     await bridge._handle_client_message(rec, _send_cmd({"session_id": "ios:t1", "content": "hello", "client_msg_id": cid}))
     assert rec.user_echo()["client_msg_id"] == cid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [5, ["a"], {"a": 1}, True])
+async def test_ws_send_with_a_client_msg_id_that_is_not_a_string_is_sent_without_one_not_an_error(bad):
+    bridge, rec = _bridge()
+    await bridge._handle_client_message(rec, _send_cmd({"session_id": "ios:t1", "content": "hello", "client_msg_id": bad}))
+    assert not any(f["type"] == "error" for f in rec.frames) and rec.user_echo()["client_msg_id"] is None

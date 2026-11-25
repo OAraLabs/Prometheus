@@ -1820,6 +1820,20 @@ def create_app(
                 content={"error": "body must be a JSON object"},
             )
 
+        # The three names the in-memory table of recent sends keeps (session, idempotency key, client_msg_id) are
+        # short strings: a longer one, or one that is not a string, is a 400, not a 500 and not a pinned table row.
+        from prometheus.memory.lcm_conversation_store import CLIENT_MSG_ID_MAX as _CID_MAX
+
+        _limits = {"session_id": 256, "idempotency_key": _CID_MAX, "client_msg_id": _CID_MAX}
+        for _field, _max in _limits.items():
+            _raw = body.get(_field)
+            if _raw is not None and not isinstance(_raw, str):
+                return JSONResponse(status_code=400, content={"error": f"{_field} must be a string", "kind": "bad_request"})
+            if isinstance(_raw, str) and len(_raw.strip()) > _max:
+                return JSONResponse(status_code=400, content={
+                    "error": f"{_field} is longer than {_max} characters", "kind": "bad_request"})
+        if body.get("message") is not None and not isinstance(body.get("message"), str):
+            return JSONResponse(status_code=400, content={"error": "message must be a string", "kind": "bad_request"})
         session_id = (body.get("session_id") or "").strip()
         message = (body.get("message") or "").strip()
         if not session_id:
@@ -1846,10 +1860,6 @@ def create_app(
 
         idempotency_key = (body.get("idempotency_key") or "").strip() or _uuid.uuid4().hex
         client_msg_id = (body.get("client_msg_id") or "").strip() or None
-        from prometheus.memory.lcm_conversation_store import CLIENT_MSG_ID_MAX as _CID_MAX
-        if client_msg_id and len(client_msg_id) > _CID_MAX:
-            return JSONResponse(status_code=400, content={
-                "error": f"client_msg_id is longer than {_CID_MAX} characters", "kind": "bad_request"})
         mode = body.get("mode") or "agent"  # absent → agent default (never an error)
         if mode not in ("agent", "chat"):
             return JSONResponse(status_code=400, content={"error": f"invalid mode {mode!r} — expected 'agent' or 'chat'"})
