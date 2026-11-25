@@ -43,7 +43,7 @@ from prometheus.permissions.approval_queue import (
     new_request_id,
 )
 from prometheus.permissions.approver import Approver
-from prometheus.permissions.argument_view import format_arguments, redact_arguments
+from prometheus.permissions.argument_view import format_arguments, render_arguments, view_was_cut
 
 logger = logging.getLogger(__name__)
 
@@ -86,12 +86,15 @@ class ComputerApprovalChannel(ApprovalQueue):
         """
         request_id = new_request_id()
         raw_text = (arguments or {}).get("text")
+        rendered = render_arguments(arguments, desktop=True)
         action = PendingAction(
             request_id=request_id,
             tool_name=tool_name,
             description=description,
             grant_computer_action=extent,
-            arguments=redact_arguments(arguments),
+            arguments=rendered.view,
+            arguments_cut=view_was_cut(rendered.view),
+            arguments_left_out=rendered.left_out,
             task_id=task_id,
             session_id=session_id,
             once_only=True,

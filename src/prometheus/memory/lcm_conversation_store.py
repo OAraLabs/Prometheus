@@ -89,6 +89,11 @@ def _is_turn_key_conflict(exc: sqlite3.IntegrityError) -> bool:
     return TURN_INDEX_GUARD_MESSAGE in str(exc)
 
 
+#: The longest ``client_msg_id`` a client may send, in characters (after trimming). It is a short name the client
+#: gives its own message; the daemon keeps one in memory per recent send and one stored row per message, so it is bounded.
+CLIENT_MSG_ID_MAX = 128
+
+
 class LCMConversationStore:
     """SQLite store for conversation messages with FTS5 search.
 
@@ -1479,7 +1484,7 @@ class LCMConversationStore:
         the row that actually correlates to it.
         """
         cid = (client_msg_id or "").strip()
-        if not cid or row_id is None:
+        if not cid or len(cid) > CLIENT_MSG_ID_MAX or row_id is None:
             return
         self._conn.execute(
             "INSERT OR REPLACE INTO message_client_ids"

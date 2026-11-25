@@ -23,7 +23,7 @@ from prometheus.permissions.approver import Approver
 from prometheus.permissions.argument_view import (
     MAX_ARGUMENTS,
     format_arguments,
-    redact_arguments,
+    render_arguments,
     view_was_cut,
 )
 from prometheus.permissions.critical import is_critical
@@ -129,6 +129,10 @@ class PendingAction:
     #: The arguments were cut or masked when captured (``argument_view.view_was_cut``): what a surface shows
     #: is not the whole call, so it is answered in the app (``permissions/critical.py``).
     arguments_cut: bool = False
+    #: Something a person would want to see was NOT sent (``argument_view.RenderedArguments.left_out``: an argument named
+    #: ``_x`` left out, a value cut, an overflow, a worker's unsent arguments; a mask alone is not). This is the wire's
+    #: ``arguments_cut`` (``serialize_pending``); the field above is the broader "answer it in the app" reason.
+    arguments_left_out: bool = False
     #: What the owner's critical lists matched at capture, from the RAW arguments (``CriticalRules.matches``).
     critical_matches: tuple[str, ...] = ()
     #: The chat the prompt went to (Telegram), so a withdrawal is told where the request was asked. None: no chat.
@@ -580,6 +584,11 @@ class ApprovalQueue:
             # None means "this call had no arguments worth showing", which is
             # different from {} and Beacon may render the difference.
             "arguments": action.arguments,
+            # ONLY when something a person would want to see was not sent (a key left out, a value cut, an overflow, a
+            # worker's unsent arguments), and absent otherwise, never false: a client that does not know the field
+            # reads nothing, and a call with nothing left out is as before. A mask alone is not one (the value is
+            # there, and says ``***``).
+            **({"arguments_cut": True} if action.arguments_left_out else {}),
             # A desktop task's prompt says which task and session asked, and
             # that it is approve-once. ABSENT for every other request, so no
             # existing payload changes shape.
@@ -705,7 +714,10 @@ class ApprovalQueue:
             logger.warning("approval for %s refused: %d arguments cannot be shown", tool_name, len(arguments))
             return ApprovalResult.DENIED
         request_id = new_request_id()
-        view = redact_arguments(arguments, wire=worker_task_id is not None)
+        # A desktop action (the gate passes its extent) carries three validated handles on every call: left out of its view.
+        rendered = render_arguments(arguments, wire=worker_task_id is not None,
+                                    desktop=grant_computer_action is not None)
+        view = rendered.view
         action = PendingAction(
             request_id=request_id,
             tool_name=tool_name,
@@ -721,6 +733,7 @@ class ApprovalQueue:
             arguments=view,
             # What the view itself says it masked, cut or left out: the ⚠ line or the overflow row (argument_view).
             arguments_cut=view_was_cut(view),
+            arguments_left_out=rendered.left_out,
             critical_matches=self._critical_rules().matches(tool_name, arguments, grant_file_path),
             session_id=session_id or RUN_SESSION.get(),
             once_only=once_only,

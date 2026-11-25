@@ -106,8 +106,14 @@ def test_opaque_plumbing_is_omitted():
     out = redact_arguments({
         "element_token": "tok-abc", "snapshot_id": "s1", "session": "sess",
         "text": "hello",
-    })
+    }, desktop=True)
     assert out == {"text": "hello"}
+
+
+def test_a_tool_that_is_not_a_desktop_action_shows_those_names_like_any_argument():
+    """An MCP tool's ``session`` is its argument, not plumbing: left out, a person would answer without seeing which one."""
+    out = redact_arguments({"session": "prod-db", "snapshot_id": "s1", "element_token": "tok-abc", "text": "hello"})
+    assert out == {"element_token": "tok-abc", "session": "prod-db", "snapshot_id": "s1", "text": "hello"}
 
 
 def test_the_payload_is_never_omitted():
@@ -118,7 +124,7 @@ def test_the_payload_is_never_omitted():
 def test_no_arguments_is_distinguishable_from_empty_ones():
     assert redact_arguments(None) is None
     assert redact_arguments({}) is None
-    assert redact_arguments({"element_token": "t"}) is None
+    assert redact_arguments({"element_token": "t"}, desktop=True) is None
 
 
 def test_format_produces_one_line_per_argument():

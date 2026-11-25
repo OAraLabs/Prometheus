@@ -1820,6 +1820,20 @@ def create_app(
                 content={"error": "body must be a JSON object"},
             )
 
+        # The three names the in-memory table of recent sends keeps (session, idempotency key, client_msg_id) are
+        # short strings: a longer one, or one that is not a string, is a 400, not a 500 and not a pinned table row.
+        from prometheus.memory.lcm_conversation_store import CLIENT_MSG_ID_MAX as _CID_MAX
+
+        _limits = {"session_id": 256, "idempotency_key": _CID_MAX, "client_msg_id": _CID_MAX}
+        for _field, _max in _limits.items():
+            _raw = body.get(_field)
+            if _raw is not None and not isinstance(_raw, str):
+                return JSONResponse(status_code=400, content={"error": f"{_field} must be a string", "kind": "bad_request"})
+            if isinstance(_raw, str) and len(_raw.strip()) > _max:
+                return JSONResponse(status_code=400, content={
+                    "error": f"{_field} is longer than {_max} characters", "kind": "bad_request"})
+        if body.get("message") is not None and not isinstance(body.get("message"), str):
+            return JSONResponse(status_code=400, content={"error": "message must be a string", "kind": "bad_request"})
         session_id = (body.get("session_id") or "").strip()
         message = (body.get("message") or "").strip()
         if not session_id:
