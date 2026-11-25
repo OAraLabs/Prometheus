@@ -86,7 +86,7 @@ class ComputerApprovalChannel(ApprovalQueue):
         """
         request_id = uuid4().hex[:8]
         raw_text = (arguments or {}).get("text")
-        rendered = render_arguments(arguments)
+        rendered = render_arguments(arguments, desktop=True)
         action = PendingAction(
             request_id=request_id,
             tool_name=tool_name,

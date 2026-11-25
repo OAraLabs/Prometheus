@@ -120,6 +120,7 @@ class SignalBus:
                 and payload.get("arguments") is not None):
             stored = dict(payload)
             stored["arguments"] = None
+            stored.pop("arguments_cut", None)       # a warning that arguments were cut, over arguments that are not there
             return ActivitySignal(kind=signal.kind, payload=stored,
                                   source=signal.source,
                                   timestamp=signal.timestamp)
