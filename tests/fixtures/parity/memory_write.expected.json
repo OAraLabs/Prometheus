@@ -23,11 +23,11 @@
      "content_json": {
       "$json": [
        {
-        "id": "rv6mxcm1fg5gqafea7v90NL4t6mDZ6L9",
+        "id": "1xGyyZZOSG0cYYU23qibxkWJir3jke3q",
         "input": {
-         "entry": "Parity canary colour is teal",
+         "entry": "Parity canary colour is teal.",
          "operation": "add",
-         "target": "memory"
+         "target": "user"
         },
         "name": "memory",
         "type": "tool_use"
@@ -43,9 +43,9 @@
      "content_json": {
       "$json": [
        {
-        "content": "added",
-        "is_error": false,
-        "tool_use_id": "rv6mxcm1fg5gqafea7v90NL4t6mDZ6L9",
+        "content": "Permission denied for memory",
+        "is_error": true,
+        "tool_use_id": "1xGyyZZOSG0cYYU23qibxkWJir3jke3q",
         "type": "tool_result"
        }
       ]
@@ -55,11 +55,11 @@
      "role": "user"
     },
     {
-     "content": "Saved to long-term memory: **parity canary colour is teal**. ✅",
+     "content": "The memory tool call was denied. I couldn't save the entry — the user needs to approve it. If you'd like, you can approve the retry and I'll store it.",
      "content_json": {
       "$json": [
        {
-        "text": "Saved to long-term memory: **parity canary colour is teal**. ✅",
+        "text": "The memory tool call was denied. I couldn't save the entry — the user needs to approve it. If you'd like, you can approve the retry and I'll store it.",
         "type": "text"
        }
       ]
@@ -70,19 +70,13 @@
     }
    ],
    "op": "chat",
-   "reply": "Saved to long-term memory: **parity canary colour is teal**. ✅",
+   "reply": "The memory tool call was denied. I couldn't save the entry — the user needs to approve it. If you'd like, you can approve the retry and I'll store it.",
    "session": "desktop:parity-memory"
   }
  ],
  "stores": {
   "home/.prometheus/.daemon_started": {
    "replaced": "<boot-specific>"
-  },
-  "home/.prometheus/MEMORY.md": {
-   "text": "Parity canary colour is teal\n"
-  },
-  "home/.prometheus/USER.md": {
-   "text": ""
   },
   "home/.prometheus/checkpoints/checkpoints.db": {
    "sqlite": {
@@ -173,6 +167,32 @@
   },
   "home/.prometheus/data/lcm.db": {
    "sqlite": {
+    "chat_projects": {
+     "columns": [
+      "id",
+      "name",
+      "name_folded",
+      "folder",
+      "folder_managed",
+      "import_key",
+      "position",
+      "created_at",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "chat_projects_rev": {
+     "columns": [
+      "id",
+      "rev"
+     ],
+     "rows": [
+      [
+       1,
+       0
+      ]
+     ]
+    },
     "checkpoints": {
      "columns": [
       "id",
@@ -233,11 +253,11 @@
        {
         "$json": [
          {
-          "id": "rv6mxcm1fg5gqafea7v90NL4t6mDZ6L9",
+          "id": "1xGyyZZOSG0cYYU23qibxkWJir3jke3q",
           "input": {
-           "entry": "Parity canary colour is teal",
+           "entry": "Parity canary colour is teal.",
            "operation": "add",
-           "target": "memory"
+           "target": "user"
           },
           "name": "memory",
           "type": "tool_use"
@@ -260,9 +280,9 @@
        {
         "$json": [
          {
-          "content": "added",
-          "is_error": false,
-          "tool_use_id": "rv6mxcm1fg5gqafea7v90NL4t6mDZ6L9",
+          "content": "Permission denied for memory",
+          "is_error": true,
+          "tool_use_id": "1xGyyZZOSG0cYYU23qibxkWJir3jke3q",
           "type": "tool_result"
          }
         ]
@@ -279,16 +299,16 @@
        "desktop:parity-memory",
        3,
        "assistant",
-       "Saved to long-term memory: **parity canary colour is teal**. ✅",
+       "The memory tool call was denied. I couldn't save the entry — the user needs to approve it. If you'd like, you can approve the retry and I'll store it.",
        {
         "$json": [
          {
-          "text": "Saved to long-term memory: **parity canary colour is teal**. ✅",
+          "text": "The memory tool call was denied. I couldn't save the entry — the user needs to approve it. If you'd like, you can approve the retry and I'll store it.",
           "type": "text"
          }
         ]
        },
-       15,
+       37,
        "<time>",
        0,
        "user",
@@ -312,7 +332,7 @@
        ""
       ],
       [
-       "Saved to long-term memory: **parity canary colour is teal**. ✅"
+       "The memory tool call was denied. I couldn't save the entry — the user needs to approve it. If you'd like, you can approve the retry and I'll store it."
       ]
      ]
     },
@@ -337,7 +357,7 @@
       [
        1,
        {
-        "$bytes_sha256": "ad9ae260ecf269e8",
+        "$bytes_sha256": "9f0be2e6c425f2e9",
         "len": 2
        }
       ],
@@ -358,8 +378,8 @@
       [
        274877906945,
        {
-        "$bytes_sha256": "92971cfc6b383d1a",
-        "len": 105
+        "$bytes_sha256": "e6cb70aa6ed828e2",
+        "len": 239
        }
       ]
      ]
@@ -394,7 +414,7 @@
       [
        4,
        {
-        "$bytes_sha256": "01ba4719c80b6fe9",
+        "$bytes_sha256": "36a9e7f1c95b82ff",
         "len": 1
        }
       ]
@@ -512,6 +532,14 @@
      ],
      "rows": []
     },
+    "session_chat_projects": {
+     "columns": [
+      "session_id",
+      "project_id",
+      "filed_at"
+     ],
+     "rows": []
+    },
     "session_forks": {
      "columns": [
       "session_id",
@@ -545,7 +573,7 @@
      "rows": [
       [
        "desktop:parity-memory",
-       "Parity canary colour teal saved",
+       "Save Parity Canary Colour",
        "<time>"
       ]
      ]
@@ -900,7 +928,7 @@
        "<uuid:5>",
        "llama_cpp",
        "light",
-       32768,
+       65536,
        "ace59500b5eb5a30",
        "tool_call",
        1,
@@ -919,12 +947,12 @@
        "<uuid:6>",
        "llama_cpp",
        "light",
-       32768,
+       65536,
        "ace59500b5eb5a30",
        "prose",
        0,
-       62,
-       "Saved to long-term memory: **parity canary colour is teal**. ✅",
+       150,
+       "The memory tool call was denied. I couldn't save the entry — the user needs to approve it. If you'd like, you can approve the retry and I'll store it.",
        "agent",
        "beacon",
        null
@@ -1611,7 +1639,7 @@
        null,
        null,
        "desktop:parity-memory",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "/models-root/.prometheus/models/saluki/Underdog-Saluki-27B-1.0-IQ2-mix.gguf",
        null,
        null,
        null,
@@ -1628,17 +1656,17 @@
        "success",
        {
         "$json": {
-         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "served_model": "/models-root/.prometheus/models/saluki/Underdog-Saluki-27B-1.0-IQ2-mix.gguf",
          "stop_reason": "tool_calls"
         }
        },
-       7467,
-       55,
+       7470,
+       56,
        0,
        "desktop:parity-memory",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "/models-root/.prometheus/models/saluki/Underdog-Saluki-27B-1.0-IQ2-mix.gguf",
        0,
-       5451,
+       0,
        null,
        "<node>",
        "local",
@@ -1653,17 +1681,17 @@
        "success",
        {
         "$json": {
-         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "served_model": "/models-root/.prometheus/models/saluki/Underdog-Saluki-27B-1.0-IQ2-mix.gguf",
          "stop_reason": "stop"
         }
        },
-       7540,
-       16,
+       7547,
+       38,
        1,
        "desktop:parity-memory",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "/models-root/.prometheus/models/saluki/Underdog-Saluki-27B-1.0-IQ2-mix.gguf",
        0,
-       7521,
+       7525,
        null,
        "<node>",
        "local",
@@ -1678,17 +1706,17 @@
        "success",
        {
         "$json": {
-         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "served_model": "/models-root/.prometheus/models/saluki/Underdog-Saluki-27B-1.0-IQ2-mix.gguf",
          "stop_reason": "stop"
         }
        },
-       101,
-       8,
+       123,
+       6,
        null,
        "desktop:parity-memory",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "/models-root/.prometheus/models/saluki/Underdog-Saluki-27B-1.0-IQ2-mix.gguf",
        0,
-       15,
+       0,
        null,
        "<node>",
        "local",
@@ -1727,109 +1755,47 @@
       [
        "<uuid:32>",
        "<time>",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "/models-root/.prometheus/models/saluki/Underdog-Saluki-27B-1.0-IQ2-mix.gguf",
        "memory",
-       1,
        0,
-       "<ms>",
+       0,
        null,
+       "permission_denied",
+       "User denied permission for memory",
        null,
-       "",
        {
         "$json": {
          "input": {
-          "entry": "Parity canary colour is teal",
+          "entry": "Parity canary colour is teal.",
           "operation": "add",
-          "target": "memory"
+          "target": "user"
          },
          "name": "memory"
         }
        },
        0,
        0,
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "/models-root/.prometheus/models/saluki/Underdog-Saluki-27B-1.0-IQ2-mix.gguf",
        "desktop:parity-memory",
-       {
-        "$json": {
-         "description": "Manage persistent memory entries. Call 'add' when the user shares a durable fact about themselves (preferences, key contacts, ongoing projects) or about the system (infrastructure, conventions, decisions) that should persist across sessions. Use 'replace' to update, 'remove' to delete, 'list' to read all entries.",
-         "name": "memory",
-         "parameters": {
-          "description": "Arguments for memory management.",
-          "properties": {
-           "entry": {
-            "anyOf": [
-             {
-              "type": "string"
-             },
-             {
-              "type": "null"
-             }
-            ],
-            "default": null,
-            "description": "Entry text for add/remove, or new entry text for replace.",
-            "title": "Entry"
-           },
-           "old_entry": {
-            "anyOf": [
-             {
-              "type": "string"
-             },
-             {
-              "type": "null"
-             }
-            ],
-            "default": null,
-            "description": "Existing entry text to match for replace.",
-            "title": "Old Entry"
-           },
-           "operation": {
-            "description": "Operation: 'add', 'replace', 'remove', or 'list'.",
-            "enum": [
-             "add",
-             "replace",
-             "remove",
-             "list"
-            ],
-            "title": "Operation",
-            "type": "string"
-           },
-           "target": {
-            "default": "memory",
-            "description": "File target: 'memory' (MEMORY.md) or 'user' (USER.md).",
-            "enum": [
-             "memory",
-             "user"
-            ],
-            "title": "Target",
-            "type": "string"
-           }
-          },
-          "required": [
-           "operation"
-          ],
-          "title": "MemoryToolInput",
-          "type": "object"
-         }
-        }
-       },
+       null,
        "<node>",
        "<turn:1>",
        0,
-       "rv6mxcm1fg5gqafea7v90NL4t6mDZ6L9",
+       "1xGyyZZOSG0cYYU23qibxkWJir3jke3q",
        null,
        null,
        0,
-       "added"
+       null
       ],
       [
        "<uuid:33>",
        "<time>",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "/models-root/.prometheus/models/saluki/Underdog-Saluki-27B-1.0-IQ2-mix.gguf",
        "_loop_transition",
-       1,
+       0,
        0,
        null,
-       null,
+       "tool_error_retry",
        null,
        null,
        null,
@@ -1952,11 +1918,11 @@
        "<time>",
        "<time>",
        2,
-       15007,
-       71,
+       15017,
+       94,
        {
         "$json": [
-         "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"
+         "/models-root/.prometheus/models/saluki/Underdog-Saluki-27B-1.0-IQ2-mix.gguf"
         ]
        },
        {

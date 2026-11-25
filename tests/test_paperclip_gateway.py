@@ -95,7 +95,7 @@ class _RecordingBridge:
         self.error = error
         self.turns: list[tuple[str, str]] = []
 
-    async def run_turn_awaited(self, session_id: str, content: str) -> tuple[str, Any]:
+    async def run_turn_awaited(self, session_id: str, content: str, *, author: str | None = None) -> tuple[str, Any]:
         self.turns.append((session_id, content))
         if self.error is not None:
             raise self.error

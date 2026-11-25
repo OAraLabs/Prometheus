@@ -259,6 +259,15 @@ async def launch_web(
     # POST /api/chat/send) can dispatch user messages through the same flow
     # the WebSocket uses, without duplicating the session+agent plumbing.
     app.state.ws_bridge = bridge
+    # The speech route's reply holder hears every frame the bridge broadcasts (web/speech_routes.py).
+    from prometheus.web.speech_routes import attach_bridge
+
+    attach_bridge(app, bridge)
+    # The git status of a work folder (web/git_routes.py): the watcher hears the bridge's frames and tells owner
+    # sockets when a folder changed; its startup proves the process limit holds before git/1 is advertised.
+    from prometheus.web.git_routes import attach_bridge as attach_git_watch
+
+    attach_git_watch(app, bridge)
     # POST /api/restart: the daemon's own restart, when it was started as the daemon.
     if request_restart is not None:
         app.state.request_restart = request_restart
@@ -424,5 +433,8 @@ async def launch_web(
         if notice.code != ALL_INTERFACES:
             logger.warning("network: %s", notice.message)
 
+    # The git self-test (is git held by the process limit here?) runs BEFORE any listener binds, so no client's
+    # `subscribed` ack can be built before `git/1` is decided (web/git_routes.py).
+    await app.state.git_watch.prepare()
     # Run every listener concurrently
     await asyncio.gather(*servers)

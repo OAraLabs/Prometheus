@@ -20,6 +20,10 @@ from pathlib import Path
 from prometheus.config.paths import get_documents_dir
 from prometheus.context.environment import EnvironmentInfo, get_environment_info
 
+#: The heading under which the OpenAI-compatible route (web/openai_api.py) appends the connecting client's own
+#: ``system`` messages to the daemon's prompt. The loop finds it again to keep that text for a held run.
+CLIENT_SYSTEM_HEADER = "# Instructions from the connecting client"
+
 #: The label the dispatch route stamps on a story's chat message
 #: (web/server.py: ``f"_Task ID: {story['story_id']}_"``). The prompt must teach the
 #: filename convention using THIS wording, because it is the only wording the model

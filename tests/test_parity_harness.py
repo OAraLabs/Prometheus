@@ -586,6 +586,9 @@ HOSTED_REQ = [{"system": "- Model: claude-haiku-4-5 (provider: anthropic) — th
 SWITCH_REQS = [{"messages": [{"content": "one"}]}, {"messages": [{"content": "title"}]},
                {"messages": [{"content": "two"}]}]
 MEMORY = {"home/.prometheus/MEMORY.md": "- the parity canary colour is teal"}
+# Since 0.9.21 a memory change asks the owner, and nothing in the harness can answer: the call is refused.
+MEMORY_REFUSED = _tel(tool_calls=(["tool_name", "error_type"], [["memory", "permission_denied"]]))
+MEMORY_DONE = _tel(tool_calls=(["tool_name", "error_type"], [["memory", None]]))
 
 
 def _undo(reply: str, *, after_undo: dict | None = None) -> list[dict]:
@@ -642,8 +645,11 @@ RECORDING_RULES = [
                          requests=HOSTED_REQ, labels=["hosted"]),
      [(_ev(steps=[{"op": "model"}, _chat("Welcome aboard!")], requests=HOSTED_REQ, labels=["hosted"]),
        "harbor")]),
-    ("memory_write", _ev(stores=MEMORY, steps=[_chat("Saved.")]),
-     [(_ev(stores=MEMORY, steps=[_chat("")]), "no final reply")]),
+    ("memory_write", _ev(stores=MEMORY_REFUSED, steps=[_chat("I couldn't save that: memory changes need your approval.")]),
+     [(_ev(stores=MEMORY_REFUSED, steps=[_chat("")]), "no final reply"),
+      (_ev(stores={}, steps=[_chat("Saved.")]), "no memory call"),
+      (_ev(stores=MEMORY_DONE, steps=[_chat("Saved.")]), "not refused"),
+      (_ev(stores={**MEMORY_REFUSED, **MEMORY}, steps=[_chat("Saved.")]), "holds the fact")]),
     ("tier_full", _ev(stores=_depot(), steps=_full(), requests=FULL_REQ),
      [(_ev(stores=_depot(), steps=_full(), requests=FULL_TOOLED_REQ), "native tools"),
       (_ev(stores=_depot(FULL_XML_ROWS[:1]), steps=_full(), requests=FULL_REQ), ">=2 executed"),

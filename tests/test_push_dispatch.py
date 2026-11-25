@@ -61,8 +61,8 @@ def _store(tmp_path) -> DeviceStore:
     return DeviceStore(tmp_path / "devices.db")
 
 
-def _device(store, name="phone", push_token=None):
-    minted = store.mint(name, "ios")
+def _device(store, name="phone", push_token=None, owner=False):
+    minted = store.mint_owner(name, "ios", by="test") if owner else store.mint(name, "ios")
     if push_token:
         assert store.set_push(minted["id"], push_token, "sandbox", "com.oaralabs.beacon")
     return minted
@@ -113,7 +113,7 @@ def test_revoked_device_cannot_register_push_and_drops_from_targets(tmp_path):
 
 def test_approval_pushes_even_with_a_live_socket(tmp_path):
     store = _store(tmp_path)
-    d = _device(store, push_token="tok-a")
+    d = _device(store, push_token="tok-a", owner=True)       # approval pushes reach owner devices only
     sender = _FakeSender()
     dispatcher = PushDispatcher(store, sender, _FakeBridge(live_ids=[d["id"]]))
 
@@ -133,8 +133,8 @@ def test_approval_pushes_even_with_a_live_socket(tmp_path):
 
 def test_turn_completed_skips_only_the_live_device(tmp_path):
     store = _store(tmp_path)
-    live = _device(store, "watching", push_token="tok-live")
-    away = _device(store, "pocketed", push_token="tok-away")
+    live = _device(store, "watching", push_token="tok-live", owner=True)  # quiet pushes reach owner devices (scoped: own sessions only)
+    away = _device(store, "pocketed", push_token="tok-away", owner=True)  # quiet pushes reach owner devices (scoped: own sessions only)
     sender = _FakeSender()
     dispatcher = PushDispatcher(store, sender, _FakeBridge(live_ids=[live["id"]]))
 
@@ -150,7 +150,7 @@ def test_global_socket_does_not_suppress_the_phone(tmp_path):
     # THE bug the spec forbids: a desktop on the global token is not a device,
     # and its live socket must not swallow the phone's push.
     store = _store(tmp_path)
-    _device(store, "phone", push_token="tok-phone")
+    _device(store, "phone", push_token="tok-phone", owner=True)  # quiet pushes reach owner devices (scoped: own sessions only)
     sender = _FakeSender()
     dispatcher = PushDispatcher(store, sender, _FakeBridge(live_ids=["global"]))
 
@@ -176,7 +176,7 @@ def test_unrelated_signals_push_nothing(tmp_path):
 
 def test_410_clears_the_registration_permanently(tmp_path):
     store = _store(tmp_path)
-    d = _device(store, push_token="tok-dead")
+    d = _device(store, push_token="tok-dead", owner=True)  # quiet pushes reach owner devices (scoped: own sessions only)
     sender = _FakeSender()
     sender.outcomes["tok-dead"] = "unregistered"
     dispatcher = PushDispatcher(store, sender, _FakeBridge())
@@ -193,7 +193,7 @@ def test_410_clears_the_registration_permanently(tmp_path):
 
 def test_failures_mute_at_threshold_and_success_resets(tmp_path):
     store = _store(tmp_path)
-    d = _device(store, push_token="tok-flaky")
+    d = _device(store, push_token="tok-flaky", owner=True)  # quiet pushes reach owner devices (scoped: own sessions only)
     sender = _FakeSender()
     sender.outcomes["tok-flaky"] = "failed"
     dispatcher = PushDispatcher(store, sender, _FakeBridge())

@@ -109,9 +109,12 @@ def memory_tool(monkeypatch, tmp_path):
 
 def _run(module, tmp_path, **kw):
     from prometheus.tools.base import ToolExecutionContext
+    from tests.support.owner_approval import owner_approved
 
-    return asyncio.run(module.MemoryTool().execute(module.MemoryToolInput(**kw),
-                                                   ToolExecutionContext(cwd=str(tmp_path), metadata={})))
+    # As the loop runs it once the owner approved the change (every change asks: GHSA-f68r-xfv4-83fr).
+    tool, args = module.MemoryTool(), module.MemoryToolInput(**kw)
+    with owner_approved(tool, args):
+        return asyncio.run(tool.execute(args, ToolExecutionContext(cwd=str(tmp_path), metadata={})))
 
 
 @pytest.mark.parametrize("target, file", [("memory", "MEMORY.md"), ("user", "USER.md")])

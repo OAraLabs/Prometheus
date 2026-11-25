@@ -1,7 +1,7 @@
 """Advertising ``_prometheus._tcp`` on the home network, and ONLY there.
 
 A phone on the same Wi-Fi has no address to type. This module lets the daemon announce itself over mDNS /
-DNS-SD so the phone can find it, say what it is called (the six ``GET /api/hello`` fields, as the TXT
+DNS-SD so the phone can find it, say what it is called (the seven ``GET /api/hello`` fields, as the TXT
 record), and ask to pair. It is deliberately timid:
 
 * **It advertises only when it should.** Home-network mode (``web/network.py``), ``discovery.mdns`` on, a
@@ -141,7 +141,7 @@ def instance_name(display_name: str) -> str:
 
 
 def txt_properties(hello: Mapping[str, Any]) -> dict[str, bytes]:
-    """The TXT record for a hello answer: its six fields as bytes, each ``key=value`` within 255 bytes.
+    """The TXT record for a hello answer: its seven fields as bytes, each ``key=value`` within 255 bytes.
 
     Raises :class:`ValueError` for a field hello does not have, or a missing one (``hello_txt``).
     """

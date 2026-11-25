@@ -182,6 +182,10 @@ class _Store:
     def push_targets(self):
         return [_target(i) for i in self.ids]
 
+    def approval_push_targets(self, *, desktop):
+        # An approval push goes to owner devices only (#915); every device here is the owner's.
+        return self.push_targets()
+
     def reset_push_failures(self, _id):
         pass
 

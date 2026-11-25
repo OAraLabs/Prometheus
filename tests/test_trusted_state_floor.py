@@ -172,7 +172,8 @@ def test_through_the_loop_a_refused_approval_writes_nothing_and_an_approved_one_
 
 
 def test_the_daemon_s_own_memory_writer_is_unaffected(monkeypatch, tmp_path):
-    """The memory tool is the daemon writing its own file: it neither asks nor is floored."""
+    """The memory tool is the daemon writing its own file: it is not floored. (It asks the owner in the approval
+    queue, GHSA-f68r-xfv4-83fr; once approved, the write itself goes through.)"""
     monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(tmp_path))
     from importlib import reload
 
@@ -184,8 +185,11 @@ def test_the_daemon_s_own_memory_writer_is_unaffected(monkeypatch, tmp_path):
     from prometheus.memory.hermes_memory_tool import MemoryTool, MemoryToolInput
     from prometheus.tools.base import ToolExecutionContext
 
-    result = asyncio.run(MemoryTool().execute(MemoryToolInput(operation="add", target="memory", entry="likes tea"),
-                                              ToolExecutionContext(cwd=str(tmp_path), metadata={})))
+    from tests.support.owner_approval import owner_approved
+
+    tool, args = MemoryTool(), MemoryToolInput(operation="add", target="memory", entry="likes tea")
+    with owner_approved(tool, args):
+        result = asyncio.run(tool.execute(args, ToolExecutionContext(cwd=str(tmp_path), metadata={})))
     assert not result.is_error and "likes tea" in (tmp_path / "MEMORY.md").read_text()
 
 

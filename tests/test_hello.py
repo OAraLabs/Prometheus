@@ -4,7 +4,8 @@ A phone on the home network has no token and no address, so this is the first th
 therefore the most exposed route the daemon has, and what is pinned is what keeps it from telling a
 stranger anything worth having:
 
-* the answer is EXACTLY six fields, an allowlist test so a seventh fails here and has to be argued for;
+* the answer is EXACTLY seven fields, an allowlist test so an eighth fails here and has to be argued for (the seventh,
+  ``ic``, is the identity-challenge version this daemon speaks: one small integer, GHSA-75cg-fxc2-f93j);
 * the mDNS TXT record is derived from the same dictionary, so the two cannot drift;
 * it carries no CORS headers and a browser (an ``Origin`` header) is refused without any, because this is
   for apps, never for a web page;
@@ -30,7 +31,7 @@ from prometheus.version import package_version  # noqa: E402
 from prometheus.web.loopback import guard_if_loopback  # noqa: E402
 from prometheus.web.server import create_app  # noqa: E402
 
-SIX = {"v", "name", "agent", "fp", "pair", "tls"}
+SIX = {"v", "name", "agent", "fp", "pair", "tls", "ic"}   # seven since the v2 identity challenge; the name is kept
 TOKEN = "hello-test-token-0123456789abcdef"
 
 
@@ -61,7 +62,7 @@ def test_it_answers_without_a_token_on_a_daemon_that_has_one():
     assert reply.status_code == 200, reply.text
 
 
-def test_it_is_exactly_six_fields():
+def test_it_is_exactly_seven_fields():
     assert set(_client().get("/api/hello").json()) == SIX
 
 
@@ -123,7 +124,8 @@ def test_the_txt_record_has_the_same_keys_and_the_same_values():
     assert set(HELLO_FIELDS) == SIX == set(txt)
     assert all(isinstance(value, str) for value in txt.values())
     assert txt["tls"] == "0"
-    assert {k: v for k, v in txt.items() if k != "tls"} == {k: v for k, v in body.items() if k != "tls"}
+    assert txt["ic"] == str(body["ic"]) == "2"
+    assert {k: v for k, v in txt.items() if k not in ("tls", "ic")} == {k: v for k, v in body.items() if k not in ("tls", "ic")}
     assert hello_txt({**body, "tls": True})["tls"] == "1"
 
 

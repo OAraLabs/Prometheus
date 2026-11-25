@@ -176,12 +176,6 @@
   "home/.prometheus/.daemon_started": {
    "replaced": "<boot-specific>"
   },
-  "home/.prometheus/MEMORY.md": {
-   "text": ""
-  },
-  "home/.prometheus/USER.md": {
-   "text": ""
-  },
   "home/.prometheus/checkpoints/blobs/56/5625f8d31de1f74f82e55989d0abe136a0647317387626c056d006e31d220cba": {
    "text": "Stock counts for this depot are kept in bin-7.txt.\n"
   },
@@ -305,6 +299,32 @@
   },
   "home/.prometheus/data/lcm.db": {
    "sqlite": {
+    "chat_projects": {
+     "columns": [
+      "id",
+      "name",
+      "name_folded",
+      "folder",
+      "folder_managed",
+      "import_key",
+      "position",
+      "created_at",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "chat_projects_rev": {
+     "columns": [
+      "id",
+      "rev"
+     ],
+     "rows": [
+      [
+       1,
+       0
+      ]
+     ]
+    },
     "checkpoints": {
      "columns": [
       "id",
@@ -860,6 +880,14 @@
       "key",
       "set_by",
       "updated_at"
+     ],
+     "rows": []
+    },
+    "session_chat_projects": {
+     "columns": [
+      "session_id",
+      "project_id",
+      "filed_at"
      ],
      "rows": []
     },

@@ -12,7 +12,7 @@ Enumerating the registry is deliberate: grepping for an expected
 name once produced a false finding, because Slack's registrations
 carry the `/prometheus-` prefix and the bare name matched nothing.
 
-## By gateway — 56 distinct commands
+## By gateway — 59 distinct commands
 
 The three gateways spell the same command differently. Telegram
 uses the bare name, Slack prefixes every one with `/prometheus-`,
@@ -58,13 +58,16 @@ reason.
 | `/note` | `/note` | `/prometheus-note` | `/prometheus core note` |
 | `/notifications` | `/notifications` | `/prometheus-notifications` | `/prometheus core notifications` |
 | `/pairs` | `/pairs` | `/prometheus-pairs` | `/prometheus core pairs` |
+| `/pause` | `/pause` | — | — |
 | `/pending` | `/pending` | `/prometheus-pending` | `/prometheus ops pending` |
+| `/person` | `/person` | — | — |
 | `/press` | `/press` | `/prometheus-press` | `/prometheus ops press` |
 | `/profile` | `/profile` | `/prometheus-profile` | `/prometheus core profile` |
 | `/queue` | `/queue` | `/prometheus-queue` | `/prometheus session queue` |
 | `/qwen` | `/qwen` | `/prometheus-qwen` | `/prometheus provider qwen` |
 | `/remember` | `/remember` | `/prometheus-remember` | `/prometheus ops remember` |
 | `/reset` | `/reset` | `/prometheus-reset` | `/prometheus core reset` |
+| `/resume` | `/resume` | — | — |
 | `/revoke` | `/revoke` | `/prometheus-revoke` | `/prometheus ops revoke` |
 | `/route` | `/route` | `/prometheus-route` | `/prometheus provider route` |
 | `/sentinel` | `/sentinel` | `/prometheus-sentinel` | `/prometheus core sentinel` |
@@ -80,7 +83,7 @@ reason.
 | `/workspace` | `/workspace` | `/prometheus-workspace` | `/prometheus core workspace` |
 | `/xai` | `/xai` | `/prometheus-xai` | `/prometheus provider xai` |
 
-## Not available in web chat — 25
+## Not available in web chat — 28
 
 `WEB_NATIVE_ONLY` in `web/slash_router.py`. These are handled by the
 chat gateways but deferred in Beacon's web chat.
@@ -103,9 +106,12 @@ chat gateways but deferred in Beacon's web chat.
 | `/local` |
 | `/mimo` |
 | `/pairs` |
+| `/pause` |
 | `/pending` |
+| `/person` |
 | `/press` |
 | `/qwen` |
+| `/resume` |
 | `/route` |
 | `/start` |
 | `/symbiote` |

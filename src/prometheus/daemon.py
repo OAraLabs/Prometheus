@@ -684,6 +684,19 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     gateway_config = config.get("gateway", {})
     security_config = config.get("security", {})
 
+    # ── Pause everything (engine/pause.py), read FIRST ──────────────────
+    # Before any gateway, scheduler, timer or turn exists: a daemon that was paused comes back paused, and an
+    # unreadable pause file means paused. Only a person resumes it.
+    from prometheus.engine import pause as _pause_mod
+
+    _pause_mod.install(_pause_mod.PauseState())
+    if (_paused_at_boot := _pause_mod.current()) is not None:
+        from datetime import datetime as _dt
+
+        logger.warning("Prometheus is PAUSED (since %s, by %s%s): nothing will run until a person resumes it",
+                       _dt.fromtimestamp(_paused_at_boot.since).strftime("%Y-%m-%d %H:%M"), _paused_at_boot.by,
+                       f", {_paused_at_boot.reason}" if _paused_at_boot.reason else "")
+
     # ── Env file (Onboarding Phase 0) ───────────────────────────────────
     # Under systemd the unit's EnvironmentFile= already populated these;
     # run bare, `oara daemon` loads the same file so tokens/keys
@@ -1204,6 +1217,12 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     # something unexpected.
     from prometheus.router.model_router import log_slash_command_wiring
     log_slash_command_wiring(config, logger)
+
+    # A route that runs with no person waiting on a plan sold for interactive use: warned, never refused.
+    from prometheus.providers.plans import unattended_warnings
+    for _plan_warnings in unattended_warnings(config).values():
+        for _line in _plan_warnings:
+            logger.warning("plans: %s", _line)
 
     divergence_detector = create_divergence_detector(config)
 
@@ -1782,6 +1801,9 @@ async def run_daemon(args: argparse.Namespace) -> bool:
             # is the safe direction. Its counterpart moved into the
             # constructor above, where absence cannot be silent.
             security_gate._approval_queue = approval_queue
+            # Which requests are answered in the app only (push.critical_*; permissions/critical.py).
+            from prometheus.permissions.critical import CriticalRules
+            approval_queue.critical_rules = CriticalRules.from_config(config)
             gateway_registry.attach("_approval_queue", approval_queue)
             logger.info("Approval queue wired to gateway adapters")
 

@@ -191,12 +191,15 @@ def floored_argv(
 def model_shell_env(overlay: dict[str, str] | None = None) -> dict[str, str]:
     """The environment a model-written shell gets: the bash tool's scrub.
 
-    An *overlay* is applied on top — a caller's explicit, in-memory grant
-    (none of the floored doors passes one today).
+    It is told the pause file (engine/pause.py), as every daemon-built child
+    is: a path, no secret. An *overlay* is applied on top — a caller's
+    explicit, in-memory grant (none of the floored doors passes one today).
     """
+    from prometheus.engine import pause as _pause
     from prometheus.security.env_scrub import scrubbed_env
 
     env = scrubbed_env()
+    env.update(_pause.child_env_entry())
     if overlay:
         env.update(overlay)
     return env
