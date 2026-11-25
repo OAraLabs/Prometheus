@@ -345,7 +345,7 @@ _CLOUD_FAST_PROVIDERS: dict[str, tuple[str, str, int]] = {
     # without a prompt could not choose them, because this table did not list them. The key variable and model are
     # CLOUD_DEFAULTS' and OVERRIDE_PRESETS' (tests/test_model_catalog_consistency.py holds the three together); the
     # budget is the wizard's (setup_wizard.PROVIDER_EFFECTIVE_LIMITS).
-    "gemini": ("GEMINI_API_KEY", "gemini-2.5-flash", 64000),
+    "gemini": ("GEMINI_API_KEY", "gemini-3.5-flash-lite", 64000),
     "xai": ("XAI_API_KEY", "grok-4.5", 64000),
 }
 
@@ -559,8 +559,12 @@ def _prompt_cloud_provider(env_path: Path) -> dict[str, Any] | None:
     )
     if key and len(key) > 10:
         write_env_template(env_path)  # make sure the commented template exists
-        from prometheus.config.env_file import set_env_value
-        set_env_value(key_env, key, env_path)
+        from prometheus.config.env_file import EnvValueError, set_env_value
+        try:
+            set_env_value(key_env, key, env_path)
+        except EnvValueError as exc:
+            print(f"  ! Not saved: {exc}. Paste the key alone, on one line.")
+            return None
         os.environ.setdefault(key_env, key)
         print(f"  + Key saved to {env_path} (as {key_env})")
     elif not os.environ.get(key_env):
@@ -628,9 +632,13 @@ def _cloud_config_noninteractive(
         return None
     if source == "environment":
         write_env_template(env_path)  # make sure the commented template exists
-        from prometheus.config.env_file import set_env_value
+        from prometheus.config.env_file import EnvValueError, set_env_value
 
-        set_env_value(key_env, os.environ[key_env], env_path)
+        try:
+            set_env_value(key_env, os.environ[key_env], env_path)
+        except EnvValueError as exc:
+            print(f"  ! ${key_env} was not copied to {env_path}: {exc}.")
+            return None
         print(f"  + {provider}: using ${key_env} from your environment "
               f"(copied to {env_path} so the daemon has it too)")
     else:

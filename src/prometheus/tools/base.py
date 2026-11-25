@@ -54,6 +54,14 @@ class BaseTool(ABC):
     async def execute(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:
         """Execute the tool."""
 
+    def requires_owner_approval(self, arguments: BaseModel) -> str | None:
+        """Why this call needs the owner's own approval, whatever the mode or a remembered grant says; None if not.
+
+        The agent loop sends such a call to the approval queue with this reason and the call's arguments, and runs it
+        only if the owner says yes. A call made with no approval channel is refused.
+        """
+        return None
+
     def is_read_only(self, arguments: BaseModel) -> bool:
         """Return whether the invocation is read-only."""
         del arguments

@@ -261,6 +261,19 @@ class LLMCallEnvelope:
             max_tokens=max_tokens,
         )
 
+        # PAUSE EVERYTHING (engine/pause.py): no side model call while paused (titles, compaction, extraction, the
+        # curator, synthesis). Not a failure of the call, so no silent_failures row; the caller's own policy decides
+        # what it gets back.
+        from prometheus.engine import pause as _pause
+
+        if (_paused := _pause.current()) is not None:
+            log.info("%s.%s: not called, Prometheus is paused", self._subsystem, operation)
+            if self._on_failure == "raise":
+                raise _pause.Paused(_paused)
+            if self._on_failure == "return_none":
+                return None
+            return LLMCallResult(text="", error=_pause.Paused(_paused), duration_ms=0.0)
+
         started = time.time()
         text_parts: list[str] = []
         usage = None
@@ -349,8 +362,16 @@ class LLMCallEnvelope:
           model id, and the EFFECTIVE thinking flag for the call
           (``request.suppress_thinking`` when set, else the provider's
           configured default; NULL when the provider has no such knob).
+        - While paused (engine/pause.py) the provider is never asked: ``Paused`` is raised before anything is
+          recorded. Session titles and conversation summaries stream through here from background tasks a pause
+          does not cancel; a turn's own rounds are also stopped at run_loop's round check.
         """
+        from prometheus.engine import pause as _pause
         from prometheus.providers.base import ApiMessageCompleteEvent
+
+        if (_paused := _pause.current()) is not None:
+            log.info("%s.%s: not called, Prometheus is paused", self._subsystem, operation)
+            raise _pause.Paused(_paused)
 
         # Effective thinking flag — record what was actually sent.
         # ApiMessageRequest.suppress_thinking (None = provider default)

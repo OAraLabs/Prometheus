@@ -245,6 +245,16 @@ def is_this_host(request_or_scope: Any) -> bool:
     return peer is not None and not peer.is_unspecified and peer == local
 
 
+def local_address(request_or_scope: Any) -> str | None:
+    """The local IP address the connection arrived on (the ASGI ``server`` slot, which uvicorn reads from the accepted
+    socket), IPv4-mapped IPv6 as IPv4; ``None`` when the slot holds a name or nothing."""
+    scope = getattr(request_or_scope, "scope", request_or_scope)
+    if not isinstance(scope, Mapping):
+        return None
+    ip = _slot_ip(scope, "server")
+    return str(ip) if ip is not None else None
+
+
 def _relayed(scope: Mapping[str, Any]) -> bool:
     """Does the request carry a header a relay adds (``_RELAY_HEADERS``)?"""
     for name, _value in scope.get("headers") or ():

@@ -8,6 +8,9 @@ The decision table, verbatim from the spec:
   turn_completed               → only to devices with NO live WS client. TURN.
   task_completed / task_failed → only when no live WS client. TASK.
   coding_complete              → only when no live WS client. TASK.
+  a NEW pause (engine/pause.py)  → owner devices with no live WS client, one
+                                 alert "Prometheus paused", no category
+                                 (``push_paused``, called by the pause itself).
 
 "Has a live WS client" is PER DEVICE (the bridge's websocket→identity map,
 which is why Piece 1 gates this piece): a desktop being open must not
@@ -27,9 +30,11 @@ Apple rate-limits liveactivity pushes; the 3s cadence is for a live socket.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import logging
+import re
 import time
 from collections import OrderedDict
 from collections.abc import Callable
@@ -78,6 +83,9 @@ ID_CAP = 200
 
 def _capped(value: Any, cap: int) -> Any:
     return value[:cap] if isinstance(value, str) else value
+
+#: "owner in Telegram (telegram:<id>)": the chat account's id stays on the daemon (``/api/status``), out of a push.
+_CHAT_ACCOUNT = re.compile(r"\s*\((?:telegram|slack|discord):[^)]*\)\s*$")
 
 
 def first_line(text: str, cap: int = 120) -> str:
@@ -168,7 +176,11 @@ class PushDispatcher:
         is the node's own public key, added by ``_named`` to every body, so a phone paired with several Prometheus
         instances knows which one is pushing.
         """
-        if payload.get("task_id") is not None:
+        from prometheus.permissions.approval_queue import PRIVATE_APPROVAL_TOOLS
+
+        # A MEMORY CHANGE'S PROMPT (GHSA-f68r-xfv4-83fr): its description is the entry itself, the owner's own
+        # words, so it gets the desktop prompt's body: no content and no APPROVAL category.
+        if payload.get("task_id") is not None or payload.get("tool_name") in PRIVATE_APPROVAL_TOOLS:
             # A DESKTOP TASK'S PROMPT (computer-use v1.1 §5.2.2): no content
             # at all — not the tool, not the app, not the element, not the
             # text. And no APPROVAL category: a lock screen that cannot show
@@ -185,9 +197,13 @@ class PushDispatcher:
                 "expires_at": payload.get("expires_at"),
             }
             desk = self._named(desk)
-            for target in self._store.push_targets():
+            for target in self._approval_targets(desktop=True):
                 await self._deliver_approval(target, desk, payload.get("request_id"))
             return
+        # A CRITICAL request (permissions/critical.py) is answered in the app: no category, so the notification
+        # offers no Approve, and ``critical: true`` so the phone can narrow before it fetches. Never sent as
+        # ``false``: a push is unauthenticated and the phone reads it only to narrow.
+        critical = payload.get("critical") is True
         body = {
             "aps": {
                 "alert": {
@@ -195,7 +211,7 @@ class PushDispatcher:
                     "body": f"{_capped(payload.get('tool_name', 'a tool'), TOOL_NAME_CAP)} — "
                             f"{first_line(str(payload.get('description') or ''))}",
                 },
-                "category": "APPROVAL",
+                **({} if critical else {"category": "APPROVAL"}),
                 "sound": "default",
                 # Correct HERE and nowhere else — an approval blocks a
                 # running turn.
@@ -205,9 +221,10 @@ class PushDispatcher:
             "request_id": _capped(payload.get("request_id"), ID_CAP),
             "tool_name": _capped(payload.get("tool_name"), TOOL_NAME_CAP),
             "expires_at": payload.get("expires_at"),
+            **({"critical": True} if critical else {}),
         }
         body = self._named(body)
-        for target in self._store.push_targets():
+        for target in self._approval_targets(desktop=False):
             await self._deliver_approval(target, body, payload.get("request_id"))
 
     async def _deliver_approval(self, target: Any, body: dict, request_id: Any) -> None:
@@ -278,6 +295,48 @@ class PushDispatcher:
         else:
             self._record("record_push_attempt", target.id, status, "failed")
 
+    def _approval_targets(self, *, desktop: bool) -> list:
+        """Owner devices (plus, for a content-free desktop prompt, devices marked for computer use): see
+        ``DeviceStore.approval_push_targets``. A store that cannot say which devices are owners gets no approval
+        push at all, rather than one to every device."""
+        pick = getattr(self._store, "approval_push_targets", None)
+        if pick is None:
+            logger.warning("push: this device store cannot name owner devices; no approval push sent")
+            return []
+        return list(pick(desktop=desktop))
+
+    async def push_paused(self, info: Any) -> None:
+        """One alert for a NEW pause (Piece 17): "Prometheus paused", who paused, to every live OWNER device with
+        no live socket. A pause nobody knows about looks like a broken agent.
+
+        No category: a lock screen offers nothing to act on (resuming is a person's, in the app). Never the reason,
+        which stays on ``/api/status``, and never a chat account's id. A store that cannot name its owners sends
+        nothing (fail closed).
+
+        OWNER devices on purpose, not the approval or quiet-push target rules: the alert is the owner's, whatever
+        else a device may see. Sent to every target at once, so one device that never answers does not keep it
+        from the others (the pause caps the whole push)."""
+        try:
+            owners = self._store.owner_device_ids()
+        except Exception:
+            logger.warning("pause alert not sent: the device store could not name its owner devices", exc_info=True)
+            return
+        live = self._live_device_ids()
+        who = _CHAT_ACCOUNT.sub("", first_line(str(getattr(info, "by", "") or ""), cap=80)) or "someone"
+        body = self._named({
+            "aps": {
+                "alert": {"title": "Prometheus paused",
+                          "body": f"Paused by {who}. Nothing runs until a person resumes it."},
+                "sound": "default",
+            },
+            "paused_since": getattr(info, "since", None),
+        })
+        targets = [t for t in self._store.push_targets() if t.id in owners and t.id not in live]
+        results = await asyncio.gather(*(self._deliver(t, body) for t in targets), return_exceptions=True)
+        for target, result in zip(targets, results):
+            if isinstance(result, Exception):
+                logger.warning("pause alert to device %s failed: %s", target.id, type(result).__name__)
+
     async def _push_quiet(self, kind: str, payload: dict) -> None:
         live = self._live_device_ids()
         category = _QUIET_KINDS[kind]
@@ -296,7 +355,12 @@ class PushDispatcher:
             **({"task_id": _capped(payload["task_id"], ID_CAP)} if payload.get("task_id") else {}),
         }
         body = self._named(body)
-        for target in self._store.push_targets():
+        # Owner devices and the device whose session it is, nobody else: the body carries a line of content.
+        pick = getattr(self._store, "quiet_push_targets", None)
+        if pick is None:
+            logger.warning("push: this device store cannot scope a quiet push; none sent")
+            return
+        for target in pick(payload.get("session_id") or None):
             # The spec's core rule: a device watching over its socket needs no
             # push; a device whose socket died (backgrounded phone) does.
             if target.id in live:

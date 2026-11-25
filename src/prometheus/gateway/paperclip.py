@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+from prometheus.engine.messages import PAPERCLIP_AUTHOR
 
 logger = logging.getLogger(__name__)
 
@@ -215,7 +216,7 @@ class PaperclipGateway:
         # session (visible in Beacon, persisted to LCM across wakes).
         session_id = f"{self.session_prefix}:issue:{issue_id}"
         try:
-            text, usage = await self.bridge.run_turn_awaited(session_id, prompt)
+            text, usage = await self.bridge.run_turn_awaited(session_id, prompt, author=PAPERCLIP_AUTHOR)
         except Exception as exc:
             logger.exception(
                 "Paperclip heartbeat %s: agent turn failed on issue %s",

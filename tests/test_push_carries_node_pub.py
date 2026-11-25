@@ -38,6 +38,16 @@ class _Store:
     def push_targets(self):
         return [SimpleNamespace(id="d1", apns_token="t", environment="sandbox", bundle_id="", push_failures=0)]
 
+    # Approval and quiet pushes go to owner devices (and a session's own device) only: the one device here is the owner's.
+    def approval_push_targets(self, *, desktop):
+        return self.push_targets()
+
+    def quiet_push_targets(self, session_id=None):
+        return self.push_targets()
+
+    def owner_device_ids(self):
+        return {"d1"}
+
     def activity_targets(self, session_id):
         return [(self.push_targets()[0], "activity-token")]
 
@@ -75,13 +85,14 @@ def _all_pushes(d, sender) -> list[dict]:
         run(d.on_signal(sig(kind, {"session_id": "s1", "task_id": "t9", "summary": "done"})))
     run(d.on_agent_progress("s1", {"phase": "tools", "round": 1}))
     run(d.on_chat_done("s1", {}))
+    run(d.push_paused(SimpleNamespace(by="owner", since=1.0)))                 # the pause alert (#920)
     return sender.sent
 
 
 def test_every_push_the_dispatcher_builds_carries_the_node_key():
     d, sender = _dispatcher(node_pub=lambda: PUB)
     bodies = _all_pushes(d, sender)
-    assert len(bodies) == 8, f"expected one of every push, got {len(bodies)}"
+    assert len(bodies) == 9, f"expected one of every push, got {len(bodies)}"
     for body in bodies:
         assert body["node_pub"] == PUB, body
 
@@ -99,7 +110,7 @@ def test_the_value_is_the_nodes_own_public_key_by_default():
 def test_a_value_that_is_not_a_node_key_is_not_pushed(bad):
     d, sender = _dispatcher(node_pub=lambda: bad)
     bodies = _all_pushes(d, sender)
-    assert len(bodies) == 8, "a bad key stopped a push from being sent"
+    assert len(bodies) == 9, "a bad key stopped a push from being sent"
     assert all("node_pub" not in b for b in bodies)
 
 
@@ -109,14 +120,14 @@ def test_a_provider_that_raises_does_not_stop_a_push():
 
     d, sender = _dispatcher(node_pub=boom)
     bodies = _all_pushes(d, sender)
-    assert len(bodies) == 8 and all("node_pub" not in b for b in bodies)
+    assert len(bodies) == 9 and all("node_pub" not in b for b in bodies)
 
 
 def test_with_no_node_key_yet_the_field_is_absent_and_the_push_goes():
     assert node_identity.get_node_pubkey() is None, "the fixture already has a node key"
     d, sender = _dispatcher()
     bodies = _all_pushes(d, sender)
-    assert len(bodies) == 8 and all("node_pub" not in b for b in bodies)
+    assert len(bodies) == 9 and all("node_pub" not in b for b in bodies)
 
 
 def test_nothing_but_the_public_key_goes_out():

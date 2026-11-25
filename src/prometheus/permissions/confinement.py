@@ -746,10 +746,13 @@ _REGISTRY_REGEX: Final[str] = '(regex #"/devices\\.db[^/]*$")'
 #: daemon write job JSON through it.
 DATA_TRUSTED_FILES: Final[tuple[str, ...]] = (
     "cron_jobs.json", "cron_history.jsonl", "cron_undelivered.jsonl", "cron_scheduler.pid",
+    # The pause-everything state (engine/pause.py), read at boot: a shell that deleted or rewrote it would undo an
+    # emergency stop at the next restart. The daemon writes ``pause.json.<hex>.tmp`` and renames it over.
+    "pause.json",
 )
 #: The Seatbelt match for :data:`DATA_TRUSTED_FILES` and anything they are a prefix of (``.tmp``, ``.corrupt``).
 _CRON_REGEX: Final[str] = (
-    '(regex #"/cron_(jobs\\.json|history\\.jsonl|undelivered\\.jsonl|scheduler\\.pid)[^/]*$")'
+    '(regex #"/(cron_(jobs\\.json|history\\.jsonl|undelivered\\.jsonl|scheduler\\.pid)|pause\\.json)[^/]*$")'
 )
 
 
@@ -997,7 +1000,9 @@ def seatbelt_profile(home: str | os.PathLike[str] | None = None, *, allow_ssh: b
         + "".join(f'  (subpath "{_sb_string(d)}")\n' for d in pairing)
         + "".join(f'  (subpath "{_sb_string(d)}")\n' for d in nodes)
         + "".join(f'  (require-all (subpath "{_sb_string(d)}") {_MCP_STORE_REGEX})\n' for d in data_dirs)
-        + "".join(f'  (require-all (subpath "{_sb_string(d)}") {_XAI_OAUTH_REGEX})\n' for d in config_dirs) +
+        + "".join(f'  (require-all (subpath "{_sb_string(d)}") {_XAI_OAUTH_REGEX})\n' for d in config_dirs)
+        # The credentials folder, whole (the env file's backups, the APNs signing key, any token beside it).
+        + f'  (subpath "{base}/.config/prometheus")\n'
         f'  (require-all (subpath "{base}/.config") (regex #"/\\.config/[^/]+/[^/]*env$")))\n'
         "(deny file-write*\n"
         + "".join(f'  (require-all (subpath "{_sb_string(d)}") {_REGISTRY_REGEX})\n' for d in data_dirs)
@@ -1026,6 +1031,7 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
     script = ('cat "$1/ordinary" >/dev/null || exit 3; '
               + ssh_check +
               'cat "$1/.config/prometheus/env" >/dev/null 2>&1 && exit 5; '
+              'cat "$1/.config/prometheus/env.bak-probe" >/dev/null 2>&1 && exit 28; '
               f'cat "$1/{MAC_PAIRING_DIR}/pair.secret" >/dev/null 2>&1 && exit 7; '
               'mv "$1/.config" "$1/moved" >/dev/null 2>&1 && exit 8; '
               f'printf x >> "$1/.prometheus/data/{REGISTRY_NAME}" 2>/dev/null && exit 9; '
@@ -1055,6 +1061,7 @@ def _probe_seatbelt(allow_ssh: bool = False) -> tuple[bool, str]:
             (home / ".ssh" / "probe").write_text("x\n")
             (home / ".config" / "prometheus").mkdir(parents=True)
             (home / ".config" / "prometheus" / "env").write_text("x\n")
+            (home / ".config" / "prometheus" / "env.bak-probe").write_text("x\n")
             (home / MAC_PAIRING_DIR).mkdir(parents=True)
             (home / MAC_PAIRING_DIR / "pair.secret").write_text("x\n")
             (home / ".prometheus" / "data").mkdir(parents=True)

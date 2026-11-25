@@ -158,9 +158,12 @@ class TestCmdGrants:
 
 
 class TestGrantMatching:
-    def test_command_prefix_matches_and_blocks_chaining(self):
+    def test_a_command_grant_matches_exactly_and_blocks_chaining(self):
+        # Exactly the approved command (0.9.21): it used to match any command that merely began with it.
+        # tests/test_command_grant_covers_exactly_what_was_approved.py holds the full set of cases.
         g = Grant(kind="command_prefix", value="ls -la", tool_name="bash")
-        assert g.matches("bash", None, "ls -la /tmp")
+        assert g.matches("bash", None, "ls -la")
+        assert not g.matches("bash", None, "ls -la /tmp")
         assert not g.matches("bash", None, _CHAINED_BAD)
         assert not g.matches("bash", None, "echo hi")
 
