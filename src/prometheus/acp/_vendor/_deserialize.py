@@ -1,0 +1,69 @@
+"""Runtime helpers that restore the lenient-deserialization semantics the ACP schema
+declares via ``x-deserialize-default-on-error`` and ``x-deserialize-skip-invalid-items``
+but that generated Pydantic models cannot express directly.
+
+Referenced by ``field_validator`` methods that ``scripts/gen_schema.py`` injects into
+``schema.py``. Mirrors the TypeScript SDK's ``src/schema-deserialize.ts``.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
+
+from pydantic import BaseModel, ValidationError
+from pydantic_core import PydanticUseDefault
+
+
+def coerce_protocol_version(value: Any, _info: Any = None) -> int:
+    """Coerce legacy string protocol versions without rejecting the connection."""
+    if isinstance(value, int):
+        return value
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 1
+
+
+def use_default_on_error(value: Any, handler: Callable[[Any], Any], _info: Any = None) -> Any:
+    """Ask Pydantic to use the declared field default after validation fails."""
+    try:
+        return handler(value)
+    except ValidationError:
+        raise PydanticUseDefault() from None
+
+
+def salvage_on_error(value: Any, handler: Callable[[Any], Any], fallback: Callable[[], Any]) -> Any:
+    """Return ``fallback()`` when ``value`` fails validation, otherwise the validated value.
+
+    Restores ``x-deserialize-default-on-error``: a malformed non-critical field is replaced
+    with its default rather than failing the whole payload.
+    """
+    try:
+        return handler(value)
+    except ValidationError:
+        return fallback()
+
+
+def skip_invalid_items(value: Any, handler: Callable[[Any], Any], _info: Any = None) -> Any:
+    """Drop array items that fail validation instead of failing the whole array.
+
+    Restores ``x-deserialize-skip-invalid-items``. Each item is validated through the field's
+    own list handler, so item coercion and salvaging still apply to the survivors.
+
+    Only wire data is skipped. An item that is already a model instance was built in local
+    code, so a validation failure there is a programming error (for example passing
+    ``McpServerHttp`` where the tagged ``HttpMcpServer`` is expected) and is raised instead of
+    being dropped silently.
+    """
+    if not isinstance(value, list):
+        return handler(value)
+    salvaged: list[Any] = []
+    for item in value:
+        try:
+            salvaged.append(handler([item])[0])
+        except ValidationError:
+            if isinstance(item, BaseModel):
+                raise
+            continue
+    return salvaged

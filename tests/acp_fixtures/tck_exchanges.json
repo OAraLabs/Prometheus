@@ -1,0 +1,251 @@
+[
+  {
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": 2,
+        "info": {
+          "name": "capture",
+          "version": "0"
+        },
+        "capabilities": {}
+      }
+    },
+    "response_raw": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":2,\"capabilities\":{\"session\":{}},\"info\":{\"name\":\"tck-fixture-conforming-v2\",\"version\":\"0.0.0\"}}}"
+  },
+  {
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "session/new",
+      "params": {
+        "cwd": "/tmp/acp-tck-capture"
+      }
+    },
+    "response_raw": "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"sess-0001\"}}"
+  },
+  {
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "method": "session/prompt",
+      "params": {
+        "sessionId": "sess-0001",
+        "prompt": [
+          {
+            "type": "text",
+            "text": "hello"
+          }
+        ],
+        "idempotencyKey": "capture-key-1"
+      }
+    },
+    "response_raw": "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"messageId\":\"msg-0001\"}}"
+  },
+  {
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 4,
+      "method": "session/prompt",
+      "params": {
+        "sessionId": "sess-0001",
+        "prompt": [
+          {
+            "type": "text",
+            "text": "hello"
+          }
+        ],
+        "idempotencyKey": "capture-key-1"
+      }
+    },
+    "response_raw": "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"sess-0001\",\"update\":{\"sessionUpdate\":\"user_message\",\"messageId\":\"msg-0001\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}}"
+  },
+  {
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 4,
+      "method": "session/prompt",
+      "params": {
+        "sessionId": "sess-0001",
+        "prompt": [
+          {
+            "type": "text",
+            "text": "hello"
+          }
+        ],
+        "idempotencyKey": "capture-key-1"
+      }
+    },
+    "response_raw": "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"sess-0001\",\"update\":{\"sessionUpdate\":\"state_update\",\"state\":\"running\"}}}"
+  },
+  {
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 4,
+      "method": "session/prompt",
+      "params": {
+        "sessionId": "sess-0001",
+        "prompt": [
+          {
+            "type": "text",
+            "text": "hello"
+          }
+        ],
+        "idempotencyKey": "capture-key-1"
+      }
+    },
+    "response_raw": "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"sess-0001\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"messageId\":\"msg-0002\",\"content\":{\"type\":\"text\",\"text\":\"ok\"}}}}"
+  },
+  {
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 4,
+      "method": "session/prompt",
+      "params": {
+        "sessionId": "sess-0001",
+        "prompt": [
+          {
+            "type": "text",
+            "text": "hello"
+          }
+        ],
+        "idempotencyKey": "capture-key-1"
+      }
+    },
+    "response_raw": "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"sess-0001\",\"update\":{\"sessionUpdate\":\"state_update\",\"state\":\"idle\",\"stopReason\":\"end_turn\"}}}"
+  },
+  {
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 4,
+      "method": "session/prompt",
+      "params": {
+        "sessionId": "sess-0001",
+        "prompt": [
+          {
+            "type": "text",
+            "text": "hello"
+          }
+        ],
+        "idempotencyKey": "capture-key-1"
+      }
+    },
+    "response_raw": "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"messageId\":\"msg-0001\"}}"
+  },
+  {
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 5,
+      "method": "session/resume",
+      "params": {
+        "sessionId": "sess-0001",
+        "cwd": "/tmp/acp-tck-capture",
+        "replayFrom": {
+          "type": "start"
+        }
+      }
+    },
+    "response_raw": "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"sess-0001\",\"update\":{\"sessionUpdate\":\"user_message\",\"messageId\":\"msg-0001\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}}"
+  },
+  {
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 5,
+      "method": "session/resume",
+      "params": {
+        "sessionId": "sess-0001",
+        "cwd": "/tmp/acp-tck-capture",
+        "replayFrom": {
+          "type": "start"
+        }
+      }
+    },
+    "response_raw": "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"sess-0001\",\"update\":{\"sessionUpdate\":\"agent_message\",\"messageId\":\"msg-0002\",\"content\":[]}}}"
+  },
+  {
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 5,
+      "method": "session/resume",
+      "params": {
+        "sessionId": "sess-0001",
+        "cwd": "/tmp/acp-tck-capture",
+        "replayFrom": {
+          "type": "start"
+        }
+      }
+    },
+    "response_raw": "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"sess-0001\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"messageId\":\"msg-0002\",\"content\":{\"type\":\"text\",\"text\":\"ok\"}}}}"
+  },
+  {
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 5,
+      "method": "session/resume",
+      "params": {
+        "sessionId": "sess-0001",
+        "cwd": "/tmp/acp-tck-capture",
+        "replayFrom": {
+          "type": "start"
+        }
+      }
+    },
+    "response_raw": "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"sess-0001\",\"update\":{\"sessionUpdate\":\"replay_complete\"}}}"
+  },
+  {
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 5,
+      "method": "session/resume",
+      "params": {
+        "sessionId": "sess-0001",
+        "cwd": "/tmp/acp-tck-capture",
+        "replayFrom": {
+          "type": "start"
+        }
+      }
+    },
+    "response_raw": "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"sess-0001\",\"update\":{\"sessionUpdate\":\"session_info_update\",\"title\":\"TCK fixture session\"}}}"
+  },
+  {
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 5,
+      "method": "session/resume",
+      "params": {
+        "sessionId": "sess-0001",
+        "cwd": "/tmp/acp-tck-capture",
+        "replayFrom": {
+          "type": "start"
+        }
+      }
+    },
+    "response_raw": "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"sess-0001\",\"update\":{\"sessionUpdate\":\"state_update\",\"state\":\"idle\"}}}"
+  },
+  {
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 5,
+      "method": "session/resume",
+      "params": {
+        "sessionId": "sess-0001",
+        "cwd": "/tmp/acp-tck-capture",
+        "replayFrom": {
+          "type": "start"
+        }
+      }
+    },
+    "response_raw": "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{}}"
+  },
+  {
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 6,
+      "method": "session/list",
+      "params": {}
+    },
+    "response_raw": "{\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{\"sessions\":[{\"sessionId\":\"sess-0001\",\"cwd\":\"/tmp/acp-tck-capture\"}]}}"
+  }
+]
