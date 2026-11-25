@@ -5383,11 +5383,10 @@ def create_app(
         went down: the queue's ``finished`` has the reason), already approved, already denied, expired, or no record
         at all (the queue is memory only, so a restart ends every request). ``ok: false`` stays in the body for
         clients that read only that. A scoped caller hears this only about its own conversation's request; anything
-        else stays ``_not_mine``'s 404, so not yours still looks exactly like not there. ``all`` is not a request id.
-        A helper, like ``_not_mine``, because ``approve_action`` is pinned to contain no membership test.
+        else stays ``_not_mine``'s 404, so not yours still looks exactly like not there. A helper, like ``_not_mine``, because ``approve_action`` is pinned to contain no membership test.
         """
         queue = app.state.approval_queue
-        if not queue or request_id == "all":
+        if not queue:
             return None
         ended = getattr(queue, "finished", lambda _rid: None)(request_id)
         if ended is None and request_id in (getattr(queue, "pending", {}) or {}):
@@ -5486,6 +5485,14 @@ def create_app(
         queue = app.state.approval_queue
         if not queue:
             return JSONResponse(status_code=404, content={"error": "approval queue not enabled"})
+        # ONE request id, and nothing else (2026-11-13): the approve path used to build chat-command text from this
+        # segment, so "all" answered every pending request. A client acts on exactly the request it shows; several at
+        # once is a chat command, not offered over REST. Anything that is not an id the queues mint is a 404, before
+        # anything reads it.
+        from prometheus.permissions.approval_queue import is_request_id as _is_request_id
+
+        if not _is_request_id(request_id):
+            return JSONResponse(status_code=404, content={"error": "unknown request"})
         # A request that has ended (a worker that asked is gone, it was answered, it expired) is a 410 that acts on
         # nothing. Before ownership: _no_longer_active keeps the 404 for a request that is not the caller's own.
         if (refusal := _no_longer_active(request, request_id)) is not None:
@@ -5511,7 +5518,7 @@ def create_app(
         from prometheus.gateway import commands as _cmds
 
         _pending = getattr(queue, "pending", {}) or {}
-        _desk = _pending.get(request_id) if request_id != "all" else None
+        _desk = _pending.get(request_id)
         # Approving is the owner's: a scoped device is refused (403) whatever the scope, and nothing was approved.
         if (refusal := _scope_refusal(request, _desk)) is not None:
             return refusal
@@ -5559,7 +5566,7 @@ def create_app(
             "remembered": outcome.remembered,
             "grant_id": outcome.grant_id,
             "message": outcome.message,
-            # Desktop prompts an "all" left alone (each is answered on its own).
+            # Always 0 on this route (one id answers one request and skips nothing); kept for a client that reads it.
             "skipped": outcome.skipped,
         }
 
@@ -5724,6 +5731,14 @@ def create_app(
         queue = app.state.approval_queue
         if not queue:
             return JSONResponse(status_code=404, content={"error": "approval queue not enabled"})
+        # ONE request id, and nothing else (2026-11-13): the approve path used to build chat-command text from this
+        # segment, so "all" answered every pending request. A client acts on exactly the request it shows; several at
+        # once is a chat command, not offered over REST. Anything that is not an id the queues mint is a 404, before
+        # anything reads it.
+        from prometheus.permissions.approval_queue import is_request_id as _is_request_id
+
+        if not _is_request_id(request_id):
+            return JSONResponse(status_code=404, content={"error": "unknown request"})
         if (refusal := _no_longer_active(request, request_id)) is not None:
             return refusal
         if (refusal := _not_mine(request, request_id)) is not None:

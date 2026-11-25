@@ -444,8 +444,10 @@ def test_a_request_this_daemon_has_no_record_of_is_410_and_says_it_may_have_rest
 
 
 def test_approve_all_is_not_a_request_id(d):
+    """Changed on purpose (2026-11-13): "all" was answered (200, every pending request approved). The approve and
+    deny routes now take one request id and nothing else (tests/test_approve_deny_take_one_id.py)."""
     r = d.answer("global", "approve", "all")
-    assert r.status_code == 200, r.text
+    assert r.status_code == 404, r.text
 
 
 # ── the daemon going down ────────────────────────────────────────────────────

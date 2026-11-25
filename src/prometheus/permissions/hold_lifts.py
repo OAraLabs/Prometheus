@@ -21,7 +21,6 @@ import asyncio
 import logging
 from collections.abc import Callable
 from typing import Any
-from uuid import uuid4
 
 from prometheus.computer.door import OnceOnly
 from prometheus.permissions.approval_queue import (
@@ -31,6 +30,7 @@ from prometheus.permissions.approval_queue import (
     ApprovalResult,
     PendingAction,
     _humanise_window,
+    new_request_id,
 )
 from prometheus.permissions.approver import Approver
 
@@ -78,7 +78,7 @@ class HoldLiftChannel(ApprovalQueue):
                      by: Approver) -> str:
         """Ask a person to lift *device_id*'s hold (``to`` None) or change it to *to*. Returns the request id at
         once; the decision lands later, and only an approval moves the hold."""
-        request_id = uuid4().hex[:8]
+        request_id = new_request_id()
         change = f"to profile {to!r}" if to else "so it runs the instance's default profile"
         description = (f"Lift the hold on device {device_name!r} ({device_id}), held to profile {current!r}, "
                        f"{change}. Asked by {by.label}.")

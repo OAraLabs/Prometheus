@@ -842,6 +842,8 @@ cannot (all measured):
 5. **`/approve all` and `POST /api/approvals/all/approve` skip computer
    entries**, including the binding prompt, and report how many they skipped.
    Today both drain them (probed; `commands.py:2618-2635`; `server.py:4452,4465`).
+   (2026-11-13: the REST route no longer takes `all`; approve and deny take one request id. `/approve all` remains
+   as a chat command, with this skipping.)
 6. **The prompt shows what will be acted on (D16).** That is the capped,
    app-text-marked element description, plus the typed text for `type_text`.
    Today a click prompt names only the app and the machine.
@@ -1892,7 +1894,7 @@ Each is labelled **decided (recommendation), revisit if you disagree**.
 | **D2: typing goes to focus** | `set_value` by element token through `call_tool` (RFC 4268's rule; `_native.py:5561`), else withhold `type-N`. The prompt never names a field the driver will not target. | PR 3 |
 | **Who picked the element** | Logged (`chooser.name`), never an extent term. | PR 3 |
 | **The computer approval channel** | A computer-only `ApprovalQueue` instance, so other tools are unaffected and the operator's `security.approval_queue.enabled` keeps its meaning. | PR 5 |
-| **`/approve all`** | Skips computer entries, on chat and REST, and says how many it skipped. | PR 5 |
+| **`/approve all`** | Skips computer entries on chat and says how many it skipped. (REST takes one request id only since 2026-11-13: no `all` there.) | PR 5 |
 | **Old iOS builds** | A payload-bearing computer approval from an iOS device without the capability header gets 409 "open on desktop or Telegram". | PR 5-6 |
 | **Binding persistence** | In memory; re-asked after a daemon restart. A durable binding is a follow-up. | PR 5 |
 | **Where the chooser runs** | A dedicated small-Gemma llama-server (E4B first), not the production slot. | PR 10 |

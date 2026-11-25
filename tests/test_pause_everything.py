@@ -260,7 +260,7 @@ class _Desktop:
 
 def test_pausing_stops_everything_and_keeps_coding_work(w, tmp_path, monkeypatch):
     queue = ApprovalQueue(security_gate=_Gate(), telegram_adapter=None)
-    queue._register(PendingAction(request_id="p1", tool_name="bash", description="run", session_id="web:x"))
+    queue._register(PendingAction(request_id="a0a0a0f1", tool_name="bash", description="run", session_id="web:x"))
     w.app.state.approval_queue = queue
     tasks = _Tasks([SimpleNamespace(id="b1", type="local_bash", status="running", session_id=None),
                     SimpleNamespace(id="w1", type="local_agent", status="running", session_id="web:x"),
@@ -287,8 +287,8 @@ def test_pausing_stops_everything_and_keeps_coding_work(w, tmp_path, monkeypatch
     control = json.loads((tmp_path / "control" / "c1" / "control.json").read_text())
     assert control["paused"] is True
     assert desk.stopped == ["dt1"]
-    assert queue.finished("p1")[0] == "withdrawn"
-    late = w.call("op", "POST", "/api/approvals/p1/approve", json={"scope": "once"})
+    assert queue.finished("a0a0a0f1")[0] == "withdrawn"
+    late = w.call("op", "POST", "/api/approvals/a0a0a0f1/approve", json={"scope": "once"})
     assert late.status_code == 410
     assert any(f.get("type") == "paused_changed" and f["payload"]["paused"] for f in frames)
 
@@ -346,7 +346,7 @@ def test_a_pause_that_cannot_be_written_still_holds_and_still_sweeps(tmp_path):
     os.chmod(ro, 0o500)
     try:
         queue = ApprovalQueue(security_gate=_Gate(), telegram_adapter=None)
-        queue._register(PendingAction(request_id="p9", tool_name="bash", description="run", session_id="web:x"))
+        queue._register(PendingAction(request_id="a0a0a0f9", tool_name="bash", description="run", session_id="web:x"))
         app = SimpleNamespace(state=SimpleNamespace(approval_queue=queue))
         result = asyncio.run(pause_routes.pause_everything(app, by="test", reason=""))
         assert result["paused"] is True and result["persisted"] is False

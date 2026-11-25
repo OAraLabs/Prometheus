@@ -995,16 +995,15 @@ def test_an_old_ios_build_cannot_approve_typed_text(rest):
     assert action._result is ApprovalResult.APPROVED
 
 
-def test_rest_approve_all_skips_desktop_prompts(rest):
+def test_rest_approve_all_does_not_answer_a_desktop_prompt(rest):
+    """Changed on purpose (2026-11-13): the approve and deny routes take one request id, so REST "all" is a 404 and
+    answers nothing, a desktop prompt included (tests/test_approve_deny_take_one_id.py). The queue's own rule, that a
+    chat "approve all" leaves desktop prompts alone, is tested at the command layer."""
     from prometheus.permissions.approval_queue import ApprovalResult
 
     action = _desk_prompt(rest, arguments=None)
-    # "all" is the operator's: a scoped device (even a marked one) answers a request by its own id, and "all"
-    # across every session is refused it (tests/test_scoped_devices_default_deny.py). The queue's own rule, that
-    # "all" leaves desktop prompts alone, is exercised with the master token.
     res = rest.client.post("/api/approvals/all/approve", json={"scope": "once"}, headers=_h(TOKEN))
-    assert res.status_code == 200, res.text
-    assert res.json().get("skipped") == 1
+    assert res.status_code == 404, res.text
     assert action._result is not ApprovalResult.APPROVED
 
 
