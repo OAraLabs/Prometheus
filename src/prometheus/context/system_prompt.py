@@ -209,6 +209,30 @@ def rewrite_model_identity(
     return _MODEL_LINE_RE.sub(line, system_prompt, count=1)
 
 
+# The working-directory line the environment section writes at boot. Same
+# discipline as the model line above: the rewriter lives beside its producer
+# (_format_environment_section) and matches its exact format.
+_WORKDIR_LINE_RE = re.compile(r"^- Working directory: .*$", re.MULTILINE)
+
+
+def rewrite_working_directory(system_prompt: str, cwd: str | Path) -> str:
+    """Point the prompt's ``- Working directory:`` line at THIS run's cwd.
+
+    The boot prompt carries the daemon's own cwd — under launchd that is
+    ``/``, which told every Beacon conversation its working directory was the
+    filesystem root while its tools actually ran in the session workspace.
+    Item W swaps the project section per run but never touched this line, so
+    the prompt contradicted itself (Environment said ``/``, Workspace said
+    the bound folder). A run with a resolved workspace rewrites the line the
+    same way the router rewrites ``- Model:`` — one substitution, exact
+    format, never stacked.
+
+    A prompt with no such line (custom base prompts, held runs) is returned
+    unchanged: this rewrites an existing statement, it does not invent one.
+    """
+    return _WORKDIR_LINE_RE.sub(f"- Working directory: {cwd}", system_prompt, count=1)
+
+
 def _format_environment_section(env: EnvironmentInfo) -> str:
     """Format the environment info section of the system prompt."""
     lines = [

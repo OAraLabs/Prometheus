@@ -377,6 +377,45 @@ class TestLoop:
         _drain(self._ctx(provider, _ProbeWriteTool(), SecurityGate(), boot_cwd=boot, workspace=None, boot_project=section))
         assert "BOOT RULE" in provider.requests[0].system_prompt
 
+    def test_environment_working_directory_follows_the_workspace(self, tmp_path) -> None:
+        """The boot Environment line names the DAEMON's cwd (launchd: "/").
+        A run bound to a workspace must rewrite it — otherwise the prompt
+        states a working directory the tools do not run in, contradicting
+        the "# Workspace" section appended right below it."""
+        from prometheus.context.system_prompt import _format_environment_section
+        from prometheus.context.environment import get_environment_info
+        boot = tmp_path / "boot"; boot.mkdir()
+        ws = tmp_path / "ws"; ws.mkdir()
+        env_section = _format_environment_section(get_environment_info(cwd=str(boot)))
+        assert f"- Working directory: {boot}" in env_section
+        registry = ToolRegistry(); registry.register(_ProbeWriteTool())
+        provider = _Scripted()
+        ctx = LoopContext(
+            provider=provider, model="stub",
+            system_prompt="BASE\n\n" + env_section,
+            max_tokens=64, tool_registry=registry, cwd=boot,
+            workspace_resolver=lambda sid: str(ws),
+        )
+        _drain(ctx)
+        prompt = provider.requests[0].system_prompt
+        assert f"- Working directory: {ws.resolve()}" in prompt
+        assert f"- Working directory: {boot}" not in prompt   # rewritten, not stacked
+
+    def test_environment_working_directory_untouched_without_a_workspace(self, tmp_path) -> None:
+        from prometheus.context.system_prompt import _format_environment_section
+        from prometheus.context.environment import get_environment_info
+        boot = tmp_path / "boot"; boot.mkdir()
+        env_section = _format_environment_section(get_environment_info(cwd=str(boot)))
+        registry = ToolRegistry(); registry.register(_ProbeWriteTool())
+        provider = _Scripted()
+        ctx = LoopContext(
+            provider=provider, model="stub",
+            system_prompt="BASE\n\n" + env_section,
+            max_tokens=64, tool_registry=registry, cwd=boot,
+        )
+        _drain(ctx)
+        assert f"- Working directory: {boot}" in provider.requests[0].system_prompt
+
 
 class TestBashFollowsTheSession:
     def test_session_roots_replace_the_lock(self, tmp_path) -> None:
