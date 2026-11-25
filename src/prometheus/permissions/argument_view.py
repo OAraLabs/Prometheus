@@ -56,6 +56,7 @@ import json
 import math
 import os
 import unicodedata
+from dataclasses import dataclass
 from typing import Any
 
 from prometheus.permissions.audit import AuditLogger
@@ -145,16 +146,43 @@ _NOISE_KEYS: frozenset[str] = frozenset({
 _NOTE_NAMES = 4
 
 
+@dataclass(frozen=True)
+class RenderedArguments:
+    """What :func:`render_arguments` made of a call: the view every surface shows, and whether it left anything out."""
+
+    view: dict[str, str] | None
+    #: Something a person would want to see was NOT sent: an argument named ``_x`` left out, a name or a value cut (even
+    #: when masking then left nothing of the cut to see), more arguments than fit (the overflow row), or a worker's
+    #: arguments not all sent. NOT: one of the three validated desktop handles left out of a DESKTOP prompt, an empty
+    #: value (shown), or a value only masked (it is there, and says so). The ``arguments_cut`` of a
+    #: served approval request is this (``ApprovalQueue.serialize_pending``); ``critical`` reads the broader
+    #: :func:`view_was_cut`, which counts a mask too.
+    left_out: bool
+
+
 def redact_arguments(
     arguments: dict[str, Any] | None,
     *,
     max_value: int = MAX_VALUE_CHARS,
     max_total: int = MAX_TOTAL_CHARS,
     wire: bool = False,
+    desktop: bool = False,
 ) -> dict[str, str] | None:
+    """The view :func:`render_arguments` makes of *arguments* (see there)."""
+    return render_arguments(arguments, max_value=max_value, max_total=max_total, wire=wire, desktop=desktop).view
+
+
+def render_arguments(
+    arguments: dict[str, Any] | None,
+    *,
+    max_value: int = MAX_VALUE_CHARS,
+    max_total: int = MAX_TOTAL_CHARS,
+    wire: bool = False,
+    desktop: bool = False,
+) -> RenderedArguments:
     """Render tool arguments for human consent: redacted, truncated, ordered, and honest about what it did.
 
-    Returns ``None`` when the call has no arguments at all. Otherwise the first entry is the ``⚠`` line when anything was
+    The view is ``None`` when the call has no arguments at all. Otherwise its first entry is the ``⚠`` line when anything was
     masked, cut or left out (see :data:`NOTE_KEY`); every other entry is one argument as one visible line. Every argument
     is shown (up to :data:`MAX_ARGS_SHOWN`): *max_total* is shared out so that a short value leaves its room to a long one
     and no argument gets less than :data:`MIN_VALUE_SHARE` characters, so padding a call with junk arguments cannot push
@@ -162,9 +190,14 @@ def redact_arguments(
 
     *wire*: the arguments came from :func:`bound_for_wire` (a worker's request): its count of arguments not sent becomes
     a line of the ``⚠`` note, and is not an argument.
+
+    *desktop*: the call is a desktop action (``ComputerApprovalChannel``), which carries the three validated handles in
+    :data:`_NOISE_KEYS` on every call: they are left out of its view without a word, because a warning on every desktop
+    action would teach people to ignore it. Any other call SHOWS them like any argument: a tool that takes a ``session``
+    is not carrying plumbing, and a person answering for it would want to see which one.
     """
     if not arguments:
-        return None
+        return RenderedArguments(None, False)
 
     not_sent = 0
     shown_keys: list[tuple[str, Any]] = []
@@ -172,14 +205,13 @@ def redact_arguments(
     for key in sorted(arguments, key=str):
         name = str(key)[:_NAME_CAP]
         value = arguments[key]
-        if wire and name == WIRE_DROPPED_KEY and isinstance(value, int) and not isinstance(value, bool):
-            not_sent = value
+        if wire and name == WIRE_DROPPED_KEY and isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            not_sent = value                               # a count of zero or less says nothing: it is an ordinary argument
             continue
-        if (name in _NOISE_KEYS or name.startswith("_")) and _is_plain_handle(value):
-            # A validated handle (every desktop call carries three) is left out without a word; any other underscore name is
-            # counted and named, because a person cannot see what it was.
-            if name.startswith("_") and name not in _NOISE_KEYS:
-                hidden_names.append(_name_visible(name))
+        if desktop and name in _NOISE_KEYS and _is_plain_handle(value):
+            continue                                       # a desktop call's own handle, left out without a word
+        if name.startswith("_") and _is_plain_handle(value):
+            hidden_names.append(_name_visible(name))       # counted and named, because a person cannot see what it was
             continue
         shown_keys.append((name, value))
 
@@ -188,26 +220,29 @@ def redact_arguments(
     rendered = []
     for name, value in shown_keys:
         is_path = name in PATH_ARGUMENT_NAMES and isinstance(value, (str, os.PathLike))
-        rendered.append((name, value, is_path, *_show(name, value, max_value, path=is_path)))
+        rendered.append((name, value, is_path, *_show(name, value, max_value, path=is_path, wire=wire)))
     shares = _shares([len(r[3]) for r in rendered], max_total, max_value)
     out: dict[str, str] = {}
     masked_names: list[str] = []
     cut_names: list[str] = []
+    short_names: list[str] = []
     for (name, value, is_path, text, was_masked, was_cut), share in zip(rendered, shares):
         if len(text) > share:
-            text, was_masked, was_cut = _show(name, value, share, path=is_path)
+            text, was_masked, was_cut = _show(name, value, share, path=is_path, wire=wire)
         label = _unique(_name_visible(name), out)
         out[label] = text
         if was_masked:
             masked_names.append(label)
         if was_cut:
             cut_names.append(label)
+        if len(_name_text(name)) > MAX_NAME_CHARS:
+            short_names.append(label)                      # shortened with its own ``…``: the wire flag counts it, the note does not
     if over:
         out[OVERFLOW_KEY] = f"({over} more argument(s) not shown)"
     note = _note(masked_names, cut_names, hidden_names, over, not_sent)
     if note:
         out = {NOTE_KEY: note, **out}
-    return out or None
+    return RenderedArguments(out or None, bool(hidden_names or cut_names or short_names or over or not_sent))
 
 
 def _shares(lengths: list[int], total: int, cap: int) -> list[int]:
@@ -281,7 +316,7 @@ def _wire_copy(arguments: dict[str, Any], kept: list[Any], dropped: int, per: in
             text = _raw(value)
             if len(text) > per:
                 half = per // 2
-                text = f"{text[:half]} … [+{len(text) - 2 * half} more chars] … {text[-half:]}"
+                text = f"{text[:half]}{_WIRE_CUT_HEAD}{len(text) - 2 * half}{_WIRE_CUT_TAIL}{text[-half:]}"
             wired = _encodable(text)
         label, n = _encodable(str(key)[:_WIRE_NAME]), 1
         while label in out or label == WIRE_DROPPED_KEY:
@@ -299,8 +334,32 @@ def _is_plain_handle(value: Any) -> bool:
     return isinstance(value, str) and 0 < len(value) <= 64 and all(ch in _PLAIN_HANDLE_CHARS for ch in value)
 
 
-def _show(name: str, value: Any, max_value: int, *, path: bool) -> tuple[str, bool, bool]:
-    """One argument value as one visible, redacted, cut line, and whether it was masked and whether it was cut."""
+#: What a worker puts between the two ends of a value it cut (``_wire_copy``: head, the count, tail), and how to find it
+#: again. Plain text matching: this module has no patterns of its own (the redactor is the audit logger's).
+_WIRE_CUT_HEAD = " … [+"
+_WIRE_CUT_TAIL = " more chars] … "
+
+
+def _worker_cut(text: str) -> bool:
+    """Does *text* hold the marker a worker leaves where it cut a value (:func:`bound_for_wire`)?"""
+    at = text.find(_WIRE_CUT_HEAD)
+    while at != -1:
+        digits = at + len(_WIRE_CUT_HEAD)
+        end = digits
+        while end < len(text) and text[end] in "0123456789":
+            end += 1
+        if end > digits and text.startswith(_WIRE_CUT_TAIL, end):
+            return True
+        at = text.find(_WIRE_CUT_HEAD, at + 1)
+    return False
+
+
+def _show(name: str, value: Any, max_value: int, *, path: bool, wire: bool = False) -> tuple[str, bool, bool]:
+    """One argument value as one visible, redacted, cut line, and whether it was masked and whether it was cut.
+
+    "Cut" is whatever left part of the value out: the display cut, the bound before redaction, or (*wire*) the worker's own
+    cut. Masking can shrink what is left until the display cut has nothing to do, so it is not enough to compare the
+    displayed text with what redaction left."""
     raw = _raw(value)
     if raw == "":
         return '""', False, False
@@ -317,7 +376,7 @@ def _show(name: str, value: Any, max_value: int, *, path: bool) -> tuple[str, bo
     was_masked = masked != spaced
     visible = _visible(masked)
     cut = (_truncate_path if path else _truncate)(visible, max_value, left_out)
-    return cut, was_masked, cut != visible
+    return cut, was_masked, cut != visible or left_out > 0 or (wire and _worker_cut(raw))
 
 
 def _raw(value: Any) -> str:
@@ -363,12 +422,18 @@ def _whitespace_only(text: str) -> str:
     return "".join(out)
 
 
-def _name_visible(name: str) -> str:
-    """An argument name as one short line of identifier characters. The model chooses names, so anything else (a space, a
-    colon, a newline, a symbol, an invisible character) is written ``⟨U+XXXX⟩``: a name cannot look like a second argument
-    (``x: rm -rf ~; y``) or like the ``⚠`` line, and two names differing by a trailing space differ on screen."""
-    text = "".join(ch if ch.isascii() and (ch.isalnum() or ch in "_.-[]")
+def _name_text(name: str) -> str:
+    """An argument name written out in full as one line of identifier characters: anything else (a space, a colon, a
+    newline, a symbol, an invisible character) is written ``⟨U+XXXX⟩``."""
+    return "".join(ch if ch.isascii() and (ch.isalnum() or ch in "_.-[]")
                    else f"⟨U+{ord(ch):04X}⟩" for ch in unicodedata.normalize("NFC", name)) or "(unnamed)"
+
+
+def _name_visible(name: str) -> str:
+    """An argument name as one short line of identifier characters. The model chooses names, so a name cannot look like a
+    second argument (``x: rm -rf ~; y``) or like the ``⚠`` line, and two names differing by a trailing space differ on
+    screen. One over :data:`MAX_NAME_CHARS` is cut with a ``…`` (which :class:`RenderedArguments` counts as left out)."""
+    text = _name_text(name)
     return text if len(text) <= MAX_NAME_CHARS else text[:MAX_NAME_CHARS - 1] + "…"
 
 
