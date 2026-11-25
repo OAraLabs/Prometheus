@@ -72,6 +72,50 @@ _MIME = {".ogg": "audio/ogg", ".oga": "audio/ogg", ".opus": "audio/ogg",
          ".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
          ".webm": "audio/webm", ".flac": "audio/flac"}
 
+#: What a voice box's OpenAI-compatible endpoint is promised to decode: WAV. A real cloud server takes more,
+#: but the contract this daemon ships against (the voice plugin's compat routes) decodes 16-bit mono WAV and
+#: answers a named 415 for anything else. A voice note is rarely WAV — Telegram sends ogg/opus, Beacon m4a or
+#: webm — so the upload is converted BEFORE it goes up, the same conversion the local engines already use.
+_REMOTE_DECODABLE = {".wav"}
+
+
+async def _to_wav_for_remote(audio_path: Path) -> tuple[Path, Path | None]:
+    """*audio_path* as 16 kHz mono WAV for the remote: (path to send, tmp to clean).
+
+    A WAV goes as it is. Anything else is converted with ffmpeg when it is installed; without ffmpeg the
+    original goes up unconverted — a cloud server may still take it, and a box that cannot answers a named
+    415, which falls back to local exactly as any other refusal does. Never a silent drop: the fallback path
+    is the existing one, and the local engines convert the same way.
+    """
+    if audio_path.suffix.lower() in _REMOTE_DECODABLE:
+        return audio_path, None
+    import shutil
+
+    if shutil.which("ffmpeg") is None:
+        return audio_path, None
+    import asyncio
+    import tempfile
+
+    tmp = Path(tempfile.mktemp(suffix=".wav"))
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-i", str(audio_path), "-ar", "16000", "-ac", "1", "-y", str(tmp),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        tmp.unlink(missing_ok=True)
+        logger.warning("ffmpeg conversion of %s timed out; sending the original audio", audio_path.name)
+        return audio_path, None
+    if proc.returncode != 0:
+        logger.warning("ffmpeg could not convert %s (%s); sending the original audio",
+                       audio_path.name, stderr.decode(errors="replace")[:200])
+        tmp.unlink(missing_ok=True)
+        return audio_path, None
+    return tmp, tmp
+
 
 @dataclass(frozen=True)
 class RemoteVoice:
@@ -299,16 +343,21 @@ async def transcribe_remote(
     server down after it was up, or answering after it was down.
     """
     path = Path(audio_path)
+    send_path, tmp_wav = await _to_wav_for_remote(path)
     try:
-        audio = path.read_bytes()
-    except OSError as exc:
-        _log_failure(settings, f"cannot read {path.name}: {exc}")
-        return None
-    data = {"model": settings.model, "response_format": "json"}
-    if language:
-        data["language"] = language
-    files = {"file": (path.name, audio, _MIME.get(path.suffix.lower(), "application/octet-stream"))}
-    resp = await _post(settings, notices, data=data, files=files)
+        try:
+            audio = send_path.read_bytes()
+        except OSError as exc:
+            _log_failure(settings, f"cannot read {send_path.name}: {exc}")
+            return None
+        data = {"model": settings.model, "response_format": "json"}
+        if language:
+            data["language"] = language
+        files = {"file": (send_path.name, audio, _MIME.get(send_path.suffix.lower(), "application/octet-stream"))}
+        resp = await _post(settings, notices, data=data, files=files)
+    finally:
+        if tmp_wav is not None:
+            tmp_wav.unlink(missing_ok=True)
     if resp is None:
         return None
     try:
