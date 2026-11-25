@@ -110,6 +110,18 @@ class TestTheQueueNamesWhoAnswered:
         assert _answered_by(queue) == ["telegram:456", "device-token:d1"]
 
     @pytest.mark.asyncio
+    async def test_the_approve_all_command_records_the_person_on_every_answer(self, tmp_path):
+        """"Approve all" is a chat command only (REST takes one id): every request it answers names who sent it."""
+        from prometheus.gateway.commands import cmd_approve
+        from prometheus.permissions.approver import Approver
+
+        queue = _queue(tmp_path)
+        _pending(queue)
+        _pending(queue, rid="def67890")
+        await cmd_approve(queue, "all", by=Approver("telegram", "456", "will", owner=True))
+        assert _answered_by(queue) == ["telegram:456", "telegram:456"]
+
+    @pytest.mark.asyncio
     async def test_the_resolved_signal_names_the_approver(self, tmp_path):
         from prometheus.permissions.approver import Approver
 
@@ -213,14 +225,14 @@ class TestRestRecordsTheCredential:
         assert res.json()["ok"] is True, res.text
         assert _answered_by(queue) == ["open"]
 
-    def test_approve_all_records_every_answer(self, tmp_path, monkeypatch):
+    def test_rest_approve_all_is_refused_and_records_nobody(self, tmp_path, monkeypatch):
+        """Changed on purpose (2026-11-13): the approve and deny routes take one request id, so REST "all" is a 404 and
+        answers nothing (tests/test_approve_deny_take_one_id.py). "Approve all" stays a chat command, whose recording is
+        ``test_the_approve_all_command_records_the_person_on_every_answer`` (chat gateways, below)."""
         queue = _queue(tmp_path)
         _pending(queue)
         _pending(queue, rid="def67890")
         client, _ = _app(queue, monkeypatch, tmp_path)
-        """Changed on purpose (2026-11-13): the approve and deny routes take one request id, so REST "all" is a 404 and
-    answers nothing (tests/test_approve_deny_take_one_id.py). "Approve all" stays a chat command; its skipping rules
-    are tested at the command layer."""
         res = client.post("/api/approvals/all/approve", json={"scope": "once"},
                           headers={"Authorization": f"Bearer {TOKEN}"})
         assert res.status_code == 404, res.text

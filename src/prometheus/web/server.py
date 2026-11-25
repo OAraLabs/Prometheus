@@ -5369,11 +5369,10 @@ def create_app(
         went down: the queue's ``finished`` has the reason), already approved, already denied, expired, or no record
         at all (the queue is memory only, so a restart ends every request). ``ok: false`` stays in the body for
         clients that read only that. A scoped caller hears this only about its own conversation's request; anything
-        else stays ``_not_mine``'s 404, so not yours still looks exactly like not there. ``all`` is not a request id.
-        A helper, like ``_not_mine``, because ``approve_action`` is pinned to contain no membership test.
+        else stays ``_not_mine``'s 404, so not yours still looks exactly like not there. A helper, like ``_not_mine``, because ``approve_action`` is pinned to contain no membership test.
         """
         queue = app.state.approval_queue
-        if not queue or request_id == "all":
+        if not queue:
             return None
         ended = getattr(queue, "finished", lambda _rid: None)(request_id)
         if ended is None and request_id in (getattr(queue, "pending", {}) or {}):
@@ -5505,7 +5504,7 @@ def create_app(
         from prometheus.gateway import commands as _cmds
 
         _pending = getattr(queue, "pending", {}) or {}
-        _desk = _pending.get(request_id) if request_id != "all" else None
+        _desk = _pending.get(request_id)
         # Approving is the owner's: a scoped device is refused (403) whatever the scope, and nothing was approved.
         if (refusal := _scope_refusal(request, _desk)) is not None:
             return refusal
@@ -5553,7 +5552,7 @@ def create_app(
             "remembered": outcome.remembered,
             "grant_id": outcome.grant_id,
             "message": outcome.message,
-            # Desktop prompts an "all" left alone (each is answered on its own).
+            # Always 0 on this route (one id answers one request and skips nothing); kept for a client that reads it.
             "skipped": outcome.skipped,
         }
 

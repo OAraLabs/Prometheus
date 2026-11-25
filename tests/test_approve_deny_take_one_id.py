@@ -8,6 +8,7 @@ approve and on deny. Approving several requests at once is a chat command (``/ap
 
 from __future__ import annotations
 
+import inspect
 import secrets
 
 import pytest
@@ -54,7 +55,9 @@ def d(tmp_path):
 @pytest.mark.parametrize("who", ["global", "owner"])
 @pytest.mark.parametrize("verb", ["approve", "deny"])
 @pytest.mark.parametrize("bad", ["all", "ALL", "always", "once", "until-restart", "A0A0A001", "a0a0a00",
-                                 "a0a0a0011", "a0a0a00g", "a0a0a001 all", "%20all", "all%20a0a0a001", "-"])
+                                 "a0a0a0011", "a0a0a00g", "a0a0a001 all", "%20all", "all%20a0a0a001", "-",
+                                 "always%20a0a0a001", "until-restart%20a0a0a001", "a0a0a001%20always",
+                                 "a0a0a001%0a", "%0aa0a0a001", "a0a0a001%00", "a0a0a001%20", "%20a0a0a001"])
 def test_anything_but_one_id_is_a_404_and_answers_nothing(d, who, verb, bad):
     client, queue, actions, owner = d
     token = GLOBAL if who == "global" else owner["token"]
@@ -76,16 +79,21 @@ def test_one_id_answers_that_request_and_no_other(d, verb):
     assert actions[0]._result == ApprovalResult.TIMEOUT and actions[2]._result == ApprovalResult.TIMEOUT
 
 
-def test_the_id_shape_is_one_definition():
+def test_what_the_minter_makes_the_route_accepts():
+    """The routes and the queues share one definition of an id. (Chat's own ``_is_request_id`` is looser on purpose:
+    it also takes 6 to 16 hex characters a person typed.)"""
     for _ in range(50):
         assert is_request_id(new_request_id())
     assert not is_request_id("all") and not is_request_id("") and not is_request_id(None)
 
 
-def test_every_queue_mints_through_the_one_helper():
+def test_no_queue_mints_an_id_by_hand():
+    """A queue that spelled its own ``uuid4().hex[:8]`` could drift from the shape the routes accept."""
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent / "src" / "prometheus"
-    for rel in ("permissions/approval_queue.py", "permissions/hold_lifts.py", "computer/approvals.py"):
-        text = (root / rel).read_text()
-        assert "request_id = uuid4().hex[:8]" not in text, rel
+    spelled = [f"{path.relative_to(root)}:{n}" for path in root.rglob("*.py")
+               for n, line in enumerate(path.read_text().splitlines(), 1)
+               if "uuid4().hex[:8]" in line and ("request_id" in line or "rid" in line)]
+    assert not spelled, spelled
+    assert is_request_id(new_request_id()) and "uuid4().hex[:8]" in inspect.getsource(new_request_id)
