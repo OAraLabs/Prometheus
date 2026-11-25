@@ -310,16 +310,16 @@ def test_telegram_turn_at_the_cap_keeps_the_user_message_and_the_turn(tmp_path, 
 # ---------------------------------------------------------------------------
 
 
-def test_max_turns_is_a_config_key_defaulting_to_200():
+def test_max_turns_is_a_config_key_defaulting_to_500():
     from prometheus.config.shipped_defaults import SHIPPED_MAX_TURNS, resolve_max_turns
 
-    assert SHIPPED_MAX_TURNS == 200
-    assert resolve_max_turns(None) == 200
-    assert resolve_max_turns({}) == 200
+    assert SHIPPED_MAX_TURNS == 500
+    assert resolve_max_turns(None) == 500
+    assert resolve_max_turns({}) == 500
     assert resolve_max_turns({"max_turns": 50}) == 50
     # A zero/negative/garbage cap would end every turn at once: not obeyed.
-    assert resolve_max_turns({"max_turns": 0}) == 200
-    assert resolve_max_turns({"max_turns": "lots"}) == 200
+    assert resolve_max_turns({"max_turns": 0}) == 500
+    assert resolve_max_turns({"max_turns": "lots"}) == 500
     # The dataclass and AgentLoop defaults are the one shipped constant.
     assert LoopContext.__dataclass_fields__["max_turns"].default == SHIPPED_MAX_TURNS
 
