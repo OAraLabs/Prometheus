@@ -96,6 +96,13 @@ def _is_turn_key_conflict(exc: sqlite3.IntegrityError) -> bool:
 #: gives its own message; the daemon keeps one in memory per recent send and one stored row per message, so it is bounded.
 CLIENT_MSG_ID_MAX = 128
 
+#: The longest value stored in ``message_client_ids.client_msg_id``. Wider than
+#: the wire cap above because a stored claim can carry a namespace prefix: an
+#: ACP idempotency claim is ``acp-key:`` + a schema-legal key of up to 255 chars
+#: (263 total). The wire cap for typed chat is unchanged; this is storage only.
+#: A value longer than this is still refused by the writer — never truncated.
+CLIENT_ID_STORAGE_MAX = 263
+
 
 def _serialized_write(fn):
     """Hold the store's write lock for the WHOLE method.
@@ -1594,6 +1601,14 @@ class LCMConversationStore:
         retire a stranded optimistic row after a missed echo, and must never cost the turn
         itself -- so it no-ops on a blank id or a missing rowid rather than raising.
 
+        The length guard is the STORAGE cap (263), not the typed-chat wire cap (128): a
+        namespaced claim (``acp-key:`` + a 255-char key) is longer than a wire id by design.
+        The wire surfaces keep their own 128-char refusal. A value over the storage cap is
+        still refused here — never truncated. This method itself returns silently for an
+        over-cap value (best-effort by contract); "never accepted-then-silently-dropped"
+        holds because the CALLERS refuse over-cap values by name before reaching it (the
+        ACP edge refuses keys whose stored form would exceed the cap; the wire routes 400).
+
         INSERT OR REPLACE, not INSERT OR IGNORE: a rowid is durable and unique, so a second write
         for the same rowid is a correction of the first, and keeping the stale id would strand
         the row that actually correlates to it.
@@ -1607,7 +1622,7 @@ class LCMConversationStore:
         """
         raw = client_msg_id or ""
         cid = raw if raw.startswith("acp-key:") else raw.strip()
-        if not cid or len(cid) > CLIENT_MSG_ID_MAX or row_id is None:
+        if not cid or len(cid) > CLIENT_ID_STORAGE_MAX or row_id is None:
             return
         self._conn.execute(
             "INSERT OR REPLACE INTO message_client_ids"
