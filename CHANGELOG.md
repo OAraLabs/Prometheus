@@ -4,7 +4,7 @@ Notable changes in each release, newest first. Releases before 0.9.7 are describ
 
 ## Unreleased
 
-- Loop: the per-turn model-round ceiling (`model.max_turns`) is now 500, to match the 500-call tool budget; it was 200, so a long turn ended on the round cap first (a 223-call turn did, on 2026-10-13). Reaching it is still a budget stop that keeps the turn's work. The repetition self-halt is unchanged and is still the real safety stop. A config that sets `model.max_turns` keeps its value.
+- Loop: the per-turn model-round ceiling (`model.max_turns`) is now 500, to match the 500-call tool budget; it was 200, so a long turn ended on the round cap first (a 223-call turn did, on 2026-10-13). Reaching it is still a budget stop that keeps the turn's work. The repetition self-halt is unchanged and is still the real safety stop. A config that sets `model.max_turns` keeps its value (a config copied from the shipped template since 0.9.10 has `max_turns: 200` written in it, and `oara doctor` and the boot log say it overrides the shipped default: delete the line to follow the new default).
 
 ## 0.9.24 (2026-11-25)
 
