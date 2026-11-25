@@ -38,6 +38,11 @@ TELEGRAM = "telegram"
 SLACK = "slack"
 DISCORD = "discord"
 IN_PROCESS = "in-process"
+#: An answer that arrived over ACP, from a paired ACP client's own credential
+#: (never the daemon's API token). A LOWER-TRUST channel than a paired Beacon
+#: device: it may approve ordinary actions, never a critical one — the refusal
+#: lives in the queue's approve/deny, so every surface inherits it.
+ACP = "acp"
 
 UNKNOWN_ID = "unknown"
 
@@ -136,3 +141,16 @@ def in_process(name: str) -> Approver:
     in the daemon's memory.
     """
     return Approver(IN_PROCESS, name, name)
+
+
+def acp_client(client_id: str, name: str = "") -> Approver:
+    """An answer given over ACP by a PAIRED client's own credential.
+
+    ``client_id`` is the paired client's stable id (its own revocable
+    credential, never the daemon's API token), so the audit row names the
+    client that gave the approval. The queue refuses a CRITICAL action's
+    approval from this kind on every surface: ACP is a lower-trust channel,
+    and "whoever launched the process said yes" is not the owner's consent
+    for anything a person must see.
+    """
+    return Approver(ACP, client_id or UNKNOWN_ID, name)
