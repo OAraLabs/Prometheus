@@ -88,6 +88,19 @@ def test_the_contracts_element_token_example_has_no_flag():
     assert served["arguments"] == {"element_token": "t", "text": "hi"}          # this tool is not a desktop action: shown
 
 
+def test_a_desktop_action_the_gate_asks_about_leaves_its_handles_out_unmarked():
+    """The gate calls ``request_approval`` for a desktop tool call too, with the action's extent: it is a desktop prompt."""
+    from prometheus.permissions.computer_extent import ComputerExtent
+
+    extent = ComputerExtent(target="mini", app="gedit", verb="type", delivery="background", site="-")
+    handles = {"session": "s1", "snapshot_id": "n1", "element_token": "tok", "text": "hi"}
+    served = _served(handles, grant_computer_action=extent)
+    assert served["arguments"] == {"text": "hi"} and "arguments_cut" not in served
+    assert _served(handles)["arguments"] == {"element_token": "tok", "session": "s1", "snapshot_id": "n1", "text": "hi"}
+    with_underscore = _served({**handles, "_x": "1"}, grant_computer_action=extent)
+    assert with_underscore["arguments_cut"] is True                          # still counted and named
+
+
 @pytest.mark.parametrize("name", ["session", "snapshot_id", "element_token"])
 def test_a_tool_that_is_not_a_desktop_action_is_shown_these_names_and_not_flagged(name):
     """A tool's own ``session`` is not plumbing: dropped, a person would answer without seeing which one (review, 11-24)."""

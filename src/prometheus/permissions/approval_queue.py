@@ -698,7 +698,9 @@ class ApprovalQueue:
             logger.warning("approval for %s refused: %d arguments cannot be shown", tool_name, len(arguments))
             return ApprovalResult.DENIED
         request_id = uuid4().hex[:8]
-        rendered = render_arguments(arguments, wire=worker_task_id is not None)
+        # A desktop action (the gate passes its extent) carries three validated handles on every call: left out of its view.
+        rendered = render_arguments(arguments, wire=worker_task_id is not None,
+                                    desktop=grant_computer_action is not None)
         view = rendered.view
         action = PendingAction(
             request_id=request_id,
