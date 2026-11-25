@@ -95,6 +95,7 @@ SCOPED_ALLOWED: frozenset[tuple[str, str]] = frozenset({
     # speech, with chat's limits: a session's reply only for a session it owns (the session path guard)
     ("GET", "/api/speech"),
     ("POST", "/api/speech/transcribe"),
+    ("POST", "/api/speech/event"),                           # wake / PTT envelopes; origin from the credential
     ("POST", "/api/speech/speak"),
     ("GET", "/api/sessions/{session_id}/speech"),
     # the one desktop route open to every valid token: a stop can only end a task
@@ -174,6 +175,7 @@ OPERATOR_ONLY: frozenset[tuple[str, str]] = frozenset({
     ("POST", "/api/cron/{name}/run"),
     # /api/devices
     ("POST", "/api/devices"),
+    ("PUT", "/api/devices/{device_id}/origin"),            # the operator declares what a voice node IS
     # /api/restart: the daemon restarts itself to apply a saved setting (Beacon's v0.4 spec, 2.4)
     ("POST", "/api/restart"),
     # /api/documents

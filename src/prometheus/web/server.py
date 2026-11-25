@@ -1916,6 +1916,14 @@ def create_app(
                 _sent_client_ids.popitem(last=False)
             sending = asyncio.get_running_loop().create_future()
             _sending_client_ids[claim] = sending
+        # The turn's VOICE origin, from the credential only (permissions/origins.py): a device the operator
+        # marked as a voice node runs its turns under that origin's held capability profile on EVERY route.
+        # An unmarked scoped device keeps today's behaviour (None). Never read from the body.
+        _origin = None
+        _identity = getattr(request.state, "device_identity", None)
+        if _identity is not None and not _identity.is_operator:
+            from prometheus.permissions.origins import origin_for_identity
+            _origin = origin_for_identity(_identity, marked_origin=_devices_or_create().device_origin(_identity.id))
         try:
             await bridge.dispatch_user_message(
                 session_id, message, client_msg_id=client_msg_id, mode=mode, tool_choice=tool_choice,
@@ -1923,6 +1931,7 @@ def create_app(
                 # A scoped device's commands are default-deny (web/route_access.SCOPED_SLASH_COMMANDS). The keyword
                 # rides only when it is False, so a duck-typed bridge that predates it still works.
                 **({} if _scope(request).unrestricted else {"operator": False}),
+                **({"origin": _origin} if _origin else {}),
             )
         except BaseException:
             # Not sent: a retry must be able to send it.
@@ -6318,6 +6327,39 @@ def create_app(
             return JSONResponse(status_code=404, content={"error": "no live device"})
         return {"id": device_id, "computer": on}
 
+    @app.put("/api/devices/{device_id}/origin")
+    async def device_origin_mark(device_id: str, request: Request):
+        """Mark a scoped device's voice origin, or clear the mark. OPERATOR ONLY.
+
+        The mark declares what a node IS (a voice box, a carried PTT device); the daemon derives the turn's
+        capability set from it (permissions/origins.py). It is the operator's explicit grant — a device can
+        never set or change its own origin, and the global token may (an operator at the machine). The body's
+        ``origin`` is one of the policy's names, or null to clear; an unknown name is refused, never guessed.
+        """
+        identity = getattr(request.state, "device_identity", None)
+        if identity is None or not identity.is_operator:
+            return JSONResponse(status_code=403, content={"error": "operator_only"})
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "invalid JSON body"})
+        if not isinstance(body, dict) or "origin" not in body:
+            return JSONResponse(status_code=400, content={"error": 'send {"origin": "<name>"} or {"origin": null}'})
+        from prometheus.permissions.origins import _CAPABILITY_SETS
+
+        origin = body["origin"]
+        if origin is not None and origin not in _CAPABILITY_SETS:
+            return JSONResponse(status_code=400, content={
+                "error": "unknown_origin",
+                "detail": f"origin is one of {', '.join(sorted(_CAPABILITY_SETS))}, or null to clear"})
+        from prometheus.permissions import approver as _approver
+
+        by = _approver.from_request(request)
+        marked = _devices_or_create().set_origin(device_id, origin, by=by.label)
+        if not marked:
+            return JSONResponse(status_code=404, content={"error": "no live device"})
+        return {"id": device_id, "origin": origin}
+
     # The catalog is a list of DEFAULTS, not the set of models this daemon can
     # run. The model string in prometheus.yaml is free-form — only the PROVIDER
     # name is validated — so anything a provider ships is reachable today by
@@ -7389,6 +7431,12 @@ def create_app(
     from prometheus.web.speech_routes import register_speech_routes
 
     register_speech_routes(app, config=config, devices=_devices, auth_on=lambda: bool(_api_token))
+
+    # ── Voice events: wake / PTT envelopes from the OAra Voice front ends (Phase 1) ────
+    # One door for every node; the origin comes from the credential (permissions/origins.py).
+    from prometheus.web.voice_events import register_voice_event_route
+
+    register_voice_event_route(app, config=config, devices=_devices_or_create)
 
     # ── Git status of a conversation's work folder (capability git/1; contract: Beacon's git-status.md) ────
     # Read-only, owner only (web/route_access.py); the launcher lets the watcher hear the bridge's frames.
