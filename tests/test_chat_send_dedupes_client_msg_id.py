@@ -243,3 +243,79 @@ def test_the_operator_can_still_send_after_a_device(tmp_path):
     sid = world.device_session("a")
     ok = world.call("op", "POST", "/api/chat/send", json={"session_id": sid, "message": "z", "client_msg_id": "op-1"})
     assert ok.status_code == 200 and GLOBAL
+
+
+# ── a client_msg_id is a short name: it is bounded ───────────────────────────
+
+def test_an_id_of_the_most_allowed_characters_is_accepted_and_deduped():
+    from prometheus.memory.lcm_conversation_store import CLIENT_MSG_ID_MAX
+
+    client, bridge = _client()
+    cid = "x" * CLIENT_MSG_ID_MAX
+    assert _send(client, cid=cid).status_code == 200
+    assert _send(client, cid=cid).json().get("duplicate") is True and len(bridge.calls) == 1
+
+
+def test_a_longer_id_is_refused_with_400_and_claims_nothing():
+    """The in-memory table holds one entry per id for the life of the daemon (bounded in COUNT, not in size), so an id
+    can be no more than a short name. A refused request dispatches nothing and remembers nothing."""
+    from prometheus.memory.lcm_conversation_store import CLIENT_MSG_ID_MAX
+
+    client, bridge = _client()
+    r = _send(client, cid="x" * (CLIENT_MSG_ID_MAX + 1))
+    assert r.status_code == 400 and "client_msg_id" in r.json()["error"] and bridge.calls == []
+    r = _send(client, cid="y" * 100_000)
+    assert r.status_code == 400 and bridge.calls == []
+
+
+def test_the_length_is_counted_after_trimming():
+    from prometheus.memory.lcm_conversation_store import CLIENT_MSG_ID_MAX
+
+    client, bridge = _client()
+    assert _send(client, cid="  " + "x" * CLIENT_MSG_ID_MAX + "  ").status_code == 200 and len(bridge.calls) == 1
+
+
+def test_the_store_records_and_answers_only_for_an_id_within_the_bound(tmp_path):
+    from prometheus.memory.lcm_conversation_store import CLIENT_MSG_ID_MAX
+
+    store = LCMConversationStore(tmp_path / "lcm.db")
+    store.set_message_client_id("s1", 1, "x" * CLIENT_MSG_ID_MAX)
+    store.set_message_client_id("s1", 2, "y" * (CLIENT_MSG_ID_MAX + 1))
+    assert store.has_message_client_id("s1", "x" * CLIENT_MSG_ID_MAX)
+    assert not store.has_message_client_id("s1", "y" * (CLIENT_MSG_ID_MAX + 1))
+    assert store.get_message_client_ids("s1") == {1: "x" * CLIENT_MSG_ID_MAX}
+
+
+@pytest.mark.parametrize("field,value", [
+    ("client_msg_id", 5), ("client_msg_id", ["a"]), ("client_msg_id", {"a": 1}), ("client_msg_id", True),
+    ("idempotency_key", 5), ("idempotency_key", ["a"]), ("session_id", 5), ("session_id", ["s1"]),
+    ("message", 5), ("message", ["hello"]),
+])
+def test_a_field_that_is_not_a_string_is_a_400_not_a_500(field, value):
+    client, bridge = _client()
+    body = {"session_id": "s1", "message": "hello", "client_msg_id": "c1"}
+    body[field] = value
+    r = client.post("/api/chat/send", json=body)
+    assert r.status_code == 400 and field in r.json()["error"] and bridge.calls == []
+
+
+@pytest.mark.parametrize("field,limit", [("idempotency_key", 128), ("session_id", 256)])
+def test_the_other_names_the_table_keeps_are_bounded_too(field, limit):
+    """A long idempotency key or session id pinned in the table of recent sends is the same hole as a long client_msg_id."""
+    client, bridge = _client()
+    ok = {"session_id": "s1", "message": "hello", "client_msg_id": "c-ok"}
+    ok[field] = "x" * limit
+    assert client.post("/api/chat/send", json=ok).status_code == 200
+    bad = {"session_id": "s1", "message": "hello", "client_msg_id": "c-bad"}
+    bad[field] = "x" * (limit + 1)
+    r = client.post("/api/chat/send", json=bad)
+    assert r.status_code == 400 and field in r.json()["error"] and len(bridge.calls) == 1
+
+
+def test_an_over_long_id_is_never_stored_or_returned_in_history(tmp_path):
+    """The WebSocket path refuses it before anything is stored; the store itself also records nothing for it."""
+    from prometheus.memory.lcm_conversation_store import CLIENT_MSG_ID_MAX
+
+    store = LCMConversationStore(tmp_path / "lcm.db")
+    store.set_message_client_id("s1", 7, "z" * (CLIENT_MSG_ID_MAX + 1))
+    assert store.get_message_client_ids("s1") == {} and not store.has_message_client_id("s1", "z" * (CLIENT_MSG_ID_MAX + 1))
