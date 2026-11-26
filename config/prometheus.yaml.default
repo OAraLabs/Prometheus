@@ -1794,3 +1794,11 @@ escalation:
   max_tokens: 4096
   teacher_model:            # required — no code default
   teacher_provider: anthropic
+
+# ACP — the Agent Client Protocol at the edge (EXPERIMENTAL, off by default).
+# Editors and outside agents speak ACP v2 to Prometheus; the internal session
+# model is unchanged. With enabled: false nothing in prometheus/acp/ runs and
+# no route imports it. Design: docs/design/acp-core.md. The approval rule for
+# ACP-borne approvals is undecided; no ACP peer can approve anything yet.
+acp:
+  enabled: false

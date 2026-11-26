@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **467** of
+Every key in `config/prometheus.yaml.default` — **469** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -483,3 +483,5 @@ none either — the key is documented so its absence is visible.
 | `escalation.max_tokens` | `4096` |
 | `escalation.teacher_model` | *(empty — no code default)* |
 | `escalation.teacher_provider` | `anthropic` |
+| `acp` | *(section)* |
+| `acp.enabled` | `False` |
