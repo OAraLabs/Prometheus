@@ -169,7 +169,24 @@ def run_post_merge_acceptance(
             box = create_sandbox(checkout, task_id=f"bb-accept-{merge_id}",
                                  backend=sandbox_backend)
             try:
-                result = asyncio.run(box.run(command, timeout_seconds=timeout_seconds))
+                # This function is sync (scripts, tests, the merge tool's
+                # worker thread). asyncio.run refuses a running loop, so a
+                # caller already inside one gets the coroutine-based path
+                # via a fresh loop in a worker thread — never a nested run.
+                try:
+                    asyncio.get_running_loop()
+                except RuntimeError:
+                    result = asyncio.run(box.run(command, timeout_seconds=timeout_seconds))
+                else:
+                    # A caller inside a running loop (the merge tool's async
+                    # execute) must not block it: the tool offloads this
+                    # whole sync function with asyncio.to_thread. Reaching
+                    # this branch means a caller did not — refuse loudly
+                    # rather than deadlock the loop.
+                    raise AcceptanceError(
+                        "run_post_merge_acceptance is sync; call it via "
+                        "asyncio.to_thread from async code"
+                    )
             except ShellFloorRefused as exc:
                 # Fail closed: a required floor this host cannot provide
                 # means nothing ran — never fall back to an unfloored shell.

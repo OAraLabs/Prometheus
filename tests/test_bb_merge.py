@@ -35,8 +35,17 @@ def repo(tmp_path: Path) -> Path:
     _git(r, "config", "user.email", "test@example.invalid")
     _git(r, "config", "user.name", "Test")
     (r / "base.txt").write_text("base\n")
+    (r / "check.sh").write_text("#!/bin/sh\nexit 0\n")
     _git(r, "add", ".")
     _git(r, "commit", "-q", "-m", "init")
+    _git(r, "branch", "bb/m1/integrate")
+    from prometheus.coding.acceptance import _write_board_record
+    _write_board_record(r, board_ref="refs/blackboard", mission="m1",
+                        path="roadmap.json", content=json.dumps({"items": [
+                            {"id": "m1.i1", "acceptance": {"command": "sh check.sh"}},
+                            {"id": "m1.i2", "acceptance": {"command": "sh check.sh"}},
+                            {"id": "m1.red", "acceptance": {"command": "exit 1"}},
+                        ]}))
     return r
 
 
@@ -98,7 +107,7 @@ def _write_tree(repo: Path, entries: dict[str, str]) -> str:
 
 
 def _args(repo: Path, **kw) -> BbMergeInput:
-    base = dict(repo=str(repo), branch="bb/m1/i1/agent-a", into="main",
+    base = dict(repo=str(repo), branch="bb/m1/i1/agent-a", into="bb/m1/integrate",
                 item_id="m1.i1", intent=MergeIntent(what="added the thing", why="the item asks for it"))
     base.update(kw)
     return BbMergeInput(**base)
@@ -192,8 +201,12 @@ async def test_a_green_dependency_allows_the_merge(repo, tool, ctx):
     assert not res.is_error, res.output
     body = json.loads(res.output)
     assert body["merged"] is True
-    assert body["acceptance"].startswith("pending")
-    assert (repo / "f.txt").read_text() == "work\n"
+    assert body["acceptance"].startswith("green")
+    assert body["merged_acceptance"]["passed"] is True
+    # the integration branch advanced; the operator's checkout did NOT
+    assert _git(repo, "rev-parse", "bb/m1/integrate") == body["commit"]
+    assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    assert not (repo / "f.txt").exists()
 
 
 # ── rule 3: conflict is a result ────────────────────────────────────────────
@@ -206,11 +219,13 @@ async def test_a_conflict_is_returned_and_the_merge_aborted(repo, tool, ctx):
     (repo / "base.txt").write_text("side A\n")
     _git(repo, "add", ".")
     _git(repo, "commit", "-q", "-m", "a")
-    _git(repo, "checkout", "-q", "main")
+    _git(repo, "checkout", "-q", "bb/m1/integrate")
     (repo / "base.txt").write_text("side B\n")
     _git(repo, "add", ".")
     _git(repo, "commit", "-q", "-m", "b")
+    _git(repo, "checkout", "-q", "main")
     head = _git(repo, "rev-parse", "HEAD")
+    integ = _git(repo, "rev-parse", "bb/m1/integrate")
     res = await tool.execute(_args(repo), ctx)
     assert res.is_error
     body = json.loads(res.output)
@@ -218,8 +233,9 @@ async def test_a_conflict_is_returned_and_the_merge_aborted(repo, tool, ctx):
     assert "base.txt" in body["conflict"]
     # the tree is exactly where it started: merge aborted, no MERGE_HEAD
     assert _git(repo, "rev-parse", "HEAD") == head
+    assert _git(repo, "rev-parse", "bb/m1/integrate") == integ  # ref did not move
     assert not (repo / ".git" / "MERGE_HEAD").exists()
-    assert (repo / "base.txt").read_text() == "side B\n"
+    assert (repo / "base.txt").read_text() == "base\n"  # operator's checkout untouched
 
 
 @pytest.mark.asyncio
@@ -227,12 +243,12 @@ async def test_a_clean_merge_commits_with_the_intent_in_the_message(repo, tool, 
     _worker_branch(repo, "bb/m1/i1/agent-a", "new.txt", "new\n")
     res = await tool.execute(_args(repo), ctx)
     assert not res.is_error, res.output
-    msg = _git(repo, "log", "-1", "--format=%B")
+    msg = _git(repo, "log", "-1", "--format=%B", "bb/m1/integrate")
     assert "bb merge: m1.i1" in msg
     assert "what: added the thing" in msg
     assert "why: the item asks for it" in msg
     # a merge commit, not a fast-forward
-    parents = _git(repo, "log", "-1", "--format=%P").split()
+    parents = _git(repo, "log", "-1", "--format=%P", "bb/m1/integrate").split()
     assert len(parents) == 2
 
 
@@ -244,13 +260,18 @@ async def test_unknown_branch_refused(repo, tool, ctx):
 
 
 @pytest.mark.asyncio
-async def test_a_dirty_tree_refused(repo, tool, ctx):
+async def test_a_dirty_operator_checkout_is_untouched(repo, tool, ctx):
+    """Review #2: the merge is built in a temp worktree — the operator's
+    dirty checkout is neither refused nor touched, and stays on main."""
     _worker_branch(repo, "bb/m1/i1/agent-a", "f.txt", "work\n")
     (repo / "base.txt").write_text("operator's uncommitted work\n")
+    head = _git(repo, "rev-parse", "HEAD")
     res = await tool.execute(_args(repo), ctx)
-    assert res.is_error
-    assert "not clean" in res.output
+    assert not res.is_error, res.output
     assert (repo / "base.txt").read_text() == "operator's uncommitted work\n"
+    assert _git(repo, "rev-parse", "HEAD") == head
+    assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    assert not (repo / ".git" / "MERGE_HEAD").exists()
 
 
 @pytest.mark.asyncio
@@ -258,3 +279,104 @@ async def test_not_a_repo_refused(tmp_path, tool, ctx):
     res = await tool.execute(_args(tmp_path), ctx)
     assert res.is_error
     assert "not a git repository" in res.output
+
+# ── review #2 fixes ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_into_must_be_the_missions_integration_branch(repo, tool, ctx):
+    _worker_branch(repo, "bb/m1/i1/agent-a", "f.txt", "work\n")
+    for bad in ("main", "bb/other/integrate", "bb/m1/whatever", "refs/heads/main"):
+        res = await tool.execute(_args(repo, into=bad), ctx)
+        assert res.is_error, bad
+        assert "integration branch" in res.output
+    assert _git(repo, "rev-parse", "main") == _git(repo, "rev-parse", "HEAD")
+
+
+@pytest.mark.asyncio
+async def test_empty_mission_refused(repo, tool, ctx):
+    _worker_branch(repo, "notbb/i1/agent", "f.txt", "work\n")
+    res = await tool.execute(_args(repo, branch="notbb/i1/agent", mission="",
+                                 into="bb/m1/integrate"), ctx)
+    assert res.is_error
+    assert "mission id required" in res.output
+
+
+@pytest.mark.asyncio
+async def test_red_acceptance_does_not_advance_the_integration_branch(repo, tool, ctx):
+    """Accept-before-advance: a red post-merge check keeps the ref where it
+    was; the result carries the red record."""
+    _worker_branch(repo, "bb/m1/red/agent-a", "f.txt", "work\n")
+    before = _git(repo, "rev-parse", "bb/m1/integrate")
+    res = await tool.execute(_args(repo, branch="bb/m1/red/agent-a", item_id="m1.red"), ctx)
+    assert res.is_error
+    body = json.loads(res.output)
+    assert body["merged"] is False
+    assert body["merged_acceptance"]["passed"] is False
+    assert _git(repo, "rev-parse", "bb/m1/integrate") == before
+    # the red record IS on the board
+    from prometheus.coding.acceptance import _write_board_record  # noqa: F401
+    rec = json.loads(_git(repo, "show",
+                          f"refs/blackboard/m1:results/merged/m1.red/{body['merged_acceptance']['merge_id']}.json"))
+    assert rec["passed"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_gate_sees_repo_as_a_written_directory():
+    """Review #2 finding 1: repo is a declared WRITTEN DIR path, so the
+    gate's workspace boundary applies — not an undeclared string that
+    falls through to ALLOW anywhere on disk."""
+    from prometheus.permissions.path_schema import declared_path_access, declared_path_params
+    schema = BbMergeInput.model_json_schema()
+    params = declared_path_params(schema)
+    assert "repo" in params
+    assert declared_path_access(schema).get("repo") == "write"
+
+
+@pytest.mark.asyncio
+async def test_a_repo_outside_the_workspace_prompts_at_the_gate(tmp_path):
+    """Through the REAL dispatch subject-builder: a bb_merge call on a repo
+    outside the workspace is not an ALLOW — the boundary sees the path."""
+    from prometheus.permissions.tool_paths import gate_path_for
+    outside = tmp_path / "elsewhere" / "repo"
+    outside.mkdir(parents=True)
+    schema = BbMergeInput.model_json_schema()
+    path, unknown = gate_path_for("bb_merge", {"repo": str(outside)}, schema=schema)
+    assert path is not None and Path(path) == outside.resolve() and unknown is None
+
+
+@pytest.mark.asyncio
+async def test_a_repo_outside_the_workspace_prompts_through_real_dispatch(tmp_path):
+    """Review #2 finding 1, at the REAL dispatch path: with the tool
+    enabled, a bb_merge call on a repo outside the workspace must prompt
+    for the workspace boundary — not fall through to ALLOW."""
+    from prometheus.__main__ import create_tool_registry
+    from prometheus.engine.agent_loop import LoopContext, _execute_tool_call
+    from prometheus.permissions.checker import SecurityGate
+
+    outside = tmp_path / "outside" / "repo"
+    outside.mkdir(parents=True)
+    _git(outside, "init", "-q", "-b", "main")
+    prompted: list = []
+    gate = SecurityGate(workspace_root=[str(tmp_path / "ws")])
+
+    async def prompt(tool_name, reason):
+        prompted.append(reason)
+        return False  # refuse — nothing should run
+
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    # daemon.py registers bb_merge only when the gate key is literally true
+    registry = create_tool_registry({}, gate)
+    registry.register(BbMergeTool())
+    ctx = LoopContext(
+        provider=None, model="t", system_prompt="", max_tokens=512,
+        tool_registry=registry,
+        permission_checker=gate, permission_prompt=prompt,
+        cwd=str(tmp_path / "ws"),
+    )
+    await _execute_tool_call(ctx, "bb_merge", "t1", {
+        "repo": str(outside), "branch": "bb/m1/i1/a", "into": "bb/m1/integrate",
+        "item_id": "m1.i1", "intent": {"what": "x", "why": "y"},
+    })
+    assert prompted, "bb_merge wrote outside the workspace WITHOUT prompting"
+    assert any("outside workspace" in r for r in prompted), prompted
