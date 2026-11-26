@@ -257,8 +257,9 @@ def test_overlong_idempotency_key_refused_never_truncated(store):
     sid = m.new_session({"cwd": "/tmp"}).session_id
     with pytest.raises(FrameError) as ei:
         m.insert_prompt({"sessionId": sid, "prompt": [{"type": "text", "text": "x"}],
-                         "idempotencyKey": "k" * 129})
+                         "idempotencyKey": "k" * 256})
     assert ei.value.code == -32602
+    assert store.get_all_messages(sid) == []
 
 
 def test_foreign_session_is_not_found(store):
@@ -328,28 +329,35 @@ def test_no_daemon_module_imports_the_acp_core():
 # ── review fixes: key-length boundary, atomicity, rowid survival ────────────
 
 
-@pytest.mark.parametrize("n", [120, 121, 128])
-def test_key_length_boundary_retry_is_idempotent_or_refused(store, n):
-    """The claim is stored WITH the 8-char 'acp-key:' prefix in a 128-char
-    column. A 120-char key fits (128 stored) and a retry must return the first
-    messageId; 121 and 128 must be REFUSED by name — never accepted and then
-    silently dropped by the store's length guard (review finding 1)."""
+@pytest.mark.parametrize("n", [120, 121, 128, 255])
+def test_key_length_boundary_retry_is_idempotent(store, n):
+    """D15 landed: the store's writer guard caps the stored claim at 263
+    (CLIENT_ID_STORAGE_MAX), so every schema-legal key (1..255) plus the
+    8-char 'acp-key:' prefix fits. A retry must return the first messageId
+    and the claim must really be stored — never silently dropped."""
     m = SessionMap(store)
     sid = m.new_session({"cwd": "/tmp"}).session_id
     key = "k" * n
     params = {"sessionId": sid, "prompt": [{"type": "text", "text": "hi"}], "idempotencyKey": key}
-    if n <= 120:
-        first = m.insert_prompt(params)
-        again = m.insert_prompt(params)
-        assert again.message_id == first.message_id
-        assert len(store.get_all_messages(sid)) == 1
-        # the claim really is stored (not silently dropped)
-        assert f"acp-key:{key}" in store.get_message_client_ids(sid).values()
-    else:
-        with pytest.raises(FrameError) as ei:
-            m.insert_prompt(params)
-        assert ei.value.code == -32602
-        assert store.get_all_messages(sid) == []
+    first = m.insert_prompt(params)
+    again = m.insert_prompt(params)
+    assert again.message_id == first.message_id
+    assert len(store.get_all_messages(sid)) == 1
+    # the claim really is stored (not silently dropped)
+    assert f"acp-key:{key}" in store.get_message_client_ids(sid).values()
+
+
+@pytest.mark.parametrize("n", [0, 256, 300])
+def test_key_outside_the_schema_range_is_refused_by_name(store, n):
+    """The schema's own 1..255 range is the ONLY refusal left: over-range
+    keys are refused at the edge, never truncated, never inserted."""
+    m = SessionMap(store)
+    sid = m.new_session({"cwd": "/tmp"}).session_id
+    params = {"sessionId": sid, "prompt": [{"type": "text", "text": "hi"}], "idempotencyKey": "k" * n}
+    with pytest.raises(FrameError) as ei:
+        m.insert_prompt(params)
+    assert ei.value.code == -32602
+    assert store.get_all_messages(sid) == []
 
 
 def test_concurrent_same_key_prompts_insert_once(store):

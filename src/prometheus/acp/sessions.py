@@ -42,17 +42,15 @@ from prometheus.acp.framing import INVALID_PARAMS, FrameError
 #: gateway ids use, so list_sessions, tombstones and scoping all just work.
 SURFACE = "acp"
 
-#: Schema IdempotencyKey: opaque, 1..255 chars, session-scoped. The daemon's
-#: client-id column caps at 128 (memory/lcm_conversation_store.CLIENT_MSG_ID_MAX)
-#: and the claim is stored WITH the "acp-key:" prefix, so the key itself must
-#: fit the cap MINUS the prefix. A longer key is refused by name at the edge —
-#: never truncated (truncation would merge distinct submissions), and never
-#: accepted-then-silently-dropped by the store's own length guard. Widening the
-#: storage is a separate migration (design doc D15), before the agent endpoint.
+#: Schema IdempotencyKey: opaque, 1..255 chars, session-scoped. The claim is
+#: stored WITH the "acp-key:" prefix; the store's writer guard caps the stored
+#: claim at CLIENT_ID_STORAGE_MAX = 263 (memory/lcm_conversation_store, D15 —
+#: a plain TEXT column, the guard IS the migration), so the full 255-char
+#: schema key round-trips: 255 + 8 = 263. A longer key is refused by name at
+#: the edge — never truncated (truncation would merge distinct submissions),
+#: and never accepted-then-silently-dropped by the store's own length guard.
 IDEMPOTENCY_KEY_MAX = 255
 _CLAIM_PREFIX = "acp-key:"
-_STORE_CLIENT_ID_MAX = 128
-_KEY_MAX = _STORE_CLIENT_ID_MAX - len(_CLAIM_PREFIX)
 
 
 def new_session_id() -> str:
@@ -158,13 +156,6 @@ class SessionMap:
         if key is not None:
             if not (1 <= len(key) <= IDEMPOTENCY_KEY_MAX):
                 raise FrameError(INVALID_PARAMS, "idempotencyKey must be 1..255 characters")
-            if len(key) > _KEY_MAX:
-                raise FrameError(
-                    INVALID_PARAMS,
-                    f"idempotencyKey longer than {_KEY_MAX} characters is not supported "
-                    f"by this agent (the stored claim adds a {len(_CLAIM_PREFIX)}-char prefix "
-                    f"to a {_STORE_CLIENT_ID_MAX}-char column; refused, never truncated)",
-                )
         text = "\n".join(b.text for b in req.prompt if getattr(b, "text", None))
         with self.store.transaction():
             if key is not None:
