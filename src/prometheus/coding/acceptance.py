@@ -114,7 +114,7 @@ def run_post_merge_acceptance(
     merge_id: str | None = None,
     board_ref: str = "refs/blackboard",
     timeout_seconds: float = _ACCEPT_TIMEOUT,
-    sandbox_backend: str = "process",
+    sandbox_backend: str | None = None,
 ) -> dict[str, Any]:
     """Run the item's acceptance command on the integration ref's tip; record it.
 
@@ -158,6 +158,21 @@ def run_post_merge_acceptance(
 
     from prometheus.coding.sandbox import create_sandbox
     from prometheus.security.shell_floor import ShellFloorRefused
+
+    if sandbox_backend is None:
+        # The CONFIGURED backend — the same one Loop Manager's acceptance
+        # uses (coding.sandbox_type, read at the run's sandbox construction)
+        # — so a host with bwrap/docker gets the stronger containment here
+        # too (review #2 nit). "process" only when nothing is configured.
+        from prometheus.config.defaults import resolve_config_path
+        from prometheus.config.load import load_config_file
+
+        load = load_config_file(
+            resolve_config_path(), subsystem="bb_acceptance",
+            substituting="the process sandbox backend", explicit=False,
+        )
+        coding_cfg = load.section("coding") or {}
+        sandbox_backend = str(coding_cfg.get("sandbox_type", "process"))
 
     started = time.time()
     with tempfile.TemporaryDirectory(prefix="bb-accept-") as tmp:
