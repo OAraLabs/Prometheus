@@ -204,10 +204,12 @@ async def test_a_conflict_is_returned_and_the_merge_aborted(repo, tool, ctx):
     # two branches touching the same line
     _git(repo, "checkout", "-q", "-b", "bb/m1/i1/agent-a")
     (repo / "base.txt").write_text("side A\n")
-    _git(repo, "add", "."); _git(repo, "commit", "-q", "-m", "a")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "a")
     _git(repo, "checkout", "-q", "main")
     (repo / "base.txt").write_text("side B\n")
-    _git(repo, "add", "."); _git(repo, "commit", "-q", "-m", "b")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "b")
     head = _git(repo, "rev-parse", "HEAD")
     res = await tool.execute(_args(repo), ctx)
     assert res.is_error
