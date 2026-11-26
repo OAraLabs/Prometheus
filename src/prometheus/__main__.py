@@ -1375,16 +1375,27 @@ def run_coding_task(args) -> int:
             _tb2.print_exc()
         # Worktree per run: remove the checkout when the run completes, on
         # EVERY exit path (this finally is the same one that releases the
-        # sandbox). The run's branch lives in the SOURCE repo's refs (a
-        # worktree shares them), and the report names it — removing the
-        # checkout loses nothing the report names. Never fatal: a cleanup
-        # failure must not replace the run's verdict.
+        # sandbox). Uncommitted work is NEVER discarded: remove_run_worktree
+        # first commits any dirty state as a WIP commit on the branch the
+        # worktree is on (the run's branch; a failed/stopped/timed-out run
+        # may not have reached the session's artifact commit) and names the
+        # branch here; if it cannot save the work, the checkout is left in
+        # place. Never fatal: a cleanup failure must not replace the run's
+        # verdict.
         if worktree_per_run:
             from prometheus.coding.sandbox import remove_run_worktree
             try:
-                if not remove_run_worktree(args.repo, sandbox.root):
+                removed, wip_branch = remove_run_worktree(args.repo, sandbox.root)
+                if wip_branch:
                     print(
-                        f"warning: run worktree may be left behind at {sandbox.root}",
+                        f"note: uncommitted work preserved as a WIP commit on "
+                        f"branch {wip_branch} in the source repo",
+                        file=sys.stderr,
+                    )
+                if not removed:
+                    print(
+                        f"warning: run worktree left in place at {sandbox.root} "
+                        f"(cleanup refused or work could not be saved)",
                         file=sys.stderr,
                     )
             except Exception:  # noqa: BLE001 — reported, never fatal

@@ -688,21 +688,80 @@ def clone_repo_for_sandbox(
     )
 
 
-def remove_run_worktree(source_repo: str | Path, worktree_path: str | Path) -> bool:
+def remove_run_worktree(
+    source_repo: str | Path,
+    worktree_path: str | Path,
+    *,
+    branch: str | None = None,
+) -> tuple[bool, str | None]:
     """Remove a run worktree created by ``clone_repo_for_sandbox(worktree=True)``.
 
-    ``git worktree remove --force`` from the source repo, then ``prune`` so
-    a half-removed entry never lingers in the source's worktree list. True
-    when the path is gone afterwards. Never raises: a cleanup failure is
-    reported by the caller and must not replace the run's verdict (the same
-    rule as ``Sandbox.close()``). Only ever called on a path THIS module
-    created under the sandbox parent — never on an operator's checkout.
+    Returns ``(removed, wip_branch)``. **Uncommitted work is never
+    discarded** (charter: deleting data that can't be regenerated is a hard
+    stop): before removing, any dirty state — tracked edits, staged changes,
+    untracked files — is committed as a WIP commit on the run's branch
+    (``branch``, the report's branch; a detached worktree gets
+    ``coding/wip-<dirname>`` created for it). ``wip_branch`` names the branch
+    carrying that commit so the caller can name it in the report; ``None``
+    when the tree was clean. If the WIP commit cannot be made, the worktree
+    is LEFT IN PLACE (``removed=False``) — never ``--force`` away work that
+    could not be saved.
+
+    ``git worktree remove --force`` from the source repo (safe now: nothing
+    uncommitted remains), then ``prune`` so a half-removed entry never
+    lingers in the source's worktree list. Never raises: a cleanup failure
+    is reported by the caller and must not replace the run's verdict (the
+    same rule as ``Sandbox.close()``). Only ever called on a path THIS
+    module created under the sandbox parent — never on an operator's
+    checkout.
     """
     import shutil
     import subprocess
 
     source = Path(source_repo).resolve()
     path = Path(worktree_path).resolve()
+    wip_branch: str | None = None
+    if path.exists():
+        try:
+            status = subprocess.run(
+                ["git", "-C", str(path), "status", "--porcelain"],
+                capture_output=True, text=True, timeout=60,
+            )
+            if status.returncode == 0 and status.stdout.strip():
+                # Dirty: save everything to a branch in the SOURCE's refs
+                # before any removal. The run's branch when the caller
+                # names it; otherwise a WIP branch off the detached HEAD.
+                head = subprocess.run(
+                    ["git", "-C", str(path), "symbolic-ref", "--quiet", "--short", "HEAD"],
+                    capture_output=True, text=True, timeout=30,
+                )
+                on_branch = head.stdout.strip() if head.returncode == 0 else ""
+                wip_branch = branch or on_branch or f"coding/wip-{path.name}"
+                if not on_branch:
+                    subprocess.run(
+                        ["git", "-C", str(path), "checkout", "-q", "-b", wip_branch],
+                        capture_output=True, text=True, timeout=30, check=True,
+                    )
+                subprocess.run(
+                    ["git", "-C", str(path), "add", "-A"],
+                    capture_output=True, text=True, timeout=60, check=True,
+                )
+                subprocess.run(
+                    ["git", "-C", str(path),
+                     "-c", "user.name=prometheus-coding",
+                     "-c", "user.email=coding@prometheus.invalid",
+                     "commit", "-q", "-m",
+                     "WIP: uncommitted work preserved at run end (worktree cleanup)"],
+                    capture_output=True, text=True, timeout=60, check=True,
+                )
+        except Exception:
+            # The work could not be saved. Leave the checkout in place;
+            # destroying it would lose data that can't be regenerated.
+            log.warning(
+                "WIP preservation failed for %s — worktree left in place", path,
+                exc_info=True,
+            )
+            return False, None
     try:
         subprocess.run(
             ["git", "-C", str(source), "worktree", "remove", "--force", str(path)],
@@ -716,8 +775,9 @@ def remove_run_worktree(source_repo: str | Path, worktree_path: str | Path) -> b
         log.warning("worktree removal failed for %s", path, exc_info=True)
     if path.exists():
         # The git command refused (a dirty lock, a moved source). The path
-        # is one this module created under the sandbox parent; removing the
-        # directory directly is the backstop, and prune clears the entry.
+        # is one this module created under the sandbox parent and any
+        # uncommitted work is already on a branch; removing the directory
+        # directly is the backstop, and prune clears the entry.
         try:
             shutil.rmtree(path)
             subprocess.run(
@@ -726,7 +786,7 @@ def remove_run_worktree(source_repo: str | Path, worktree_path: str | Path) -> b
             )
         except Exception:
             log.warning("worktree directory removal failed for %s", path, exc_info=True)
-    return not path.exists()
+    return not path.exists(), wip_branch
 
 
 # ---------------------------------------------------------------------------
