@@ -11,10 +11,13 @@ the approval rule for ACP-borne ANSWERS is `docs/design/acp-approval-channel.md`
   speaking ACP v2 over stdio, sends prompts, streams the agent's updates.
 - The agent's `session/request_permission` requests go through **the same
   gate** as Prometheus's own tool calls — never answered by the driver
-  alone, never auto-approved.
-- The outside agent runs in the **strictest ask-every-time mode**: every
-  ask reaches the owner's approval queue, even one the gate would
-  auto-allow. Anything the gate escalates goes to Beacon through the queue.
+  alone.
+- **Exactly what Prometheus's own calls get (D13 as written)**: a gate
+  ALLOW (a grant covers it, an allowlisted read, …) answers the agent's
+  `allow_once` option directly, no queue — audited like any gate-allowed
+  call, with a row naming the outside agent. A gate APPROVE goes to the
+  owner's approval queue; anything the gate escalates goes to Beacon
+  through the queue.
 - The registry of drivable agents ships **EMPTY**; each entry is an explicit
   operator grant in `acp.clients`. Nothing outside the registry launches.
 - **Hard-disabled for machine/benchmark sessions** (`bakeoff:`, `eval:`,
@@ -39,13 +42,21 @@ own options. The driver:
    to `bash`; an unknown tool name is never assumed read-only);
 2. a DENY-tier decision → the agent's `reject_once` option (or `cancelled`
    when none was offered). The agent MUST NOT proceed;
-3. an ALLOW or APPROVE decision → the **owner's approval queue**,
-   approve-once (`once_only=True`, like a spawned worker's request — a
-   driven agent's consent is per-call, never a lasting grant);
-4. the owner approves → the agent's `allow_once` option. **Never
-   `allow_always`**, even when the agent offers it;
-5. no gate, no queue, a timeout, a denial, or any failure along the path →
-   refusal. Fail closed at every step.
+3. an ALLOW decision → the agent's `allow_once` option **directly, no
+   queue** — the same call Prometheus itself would run without a prompt.
+   The gate's `evaluate` writes its ALLOW audit row; the driver adds one
+   naming the outside agent the allow answered (`acp-agent:<name>`), so
+   the record says who ran it, not just what was allowed. The audit write
+   is best-effort: a logger that cannot write never refuses a call the
+   gate allowed;
+4. an APPROVE decision → the **owner's approval queue**, approve-once
+   (`once_only=True`, like a spawned worker's request — a driven agent's
+   consent is per-call, never a lasting grant). The owner approves → the
+   agent's `allow_once` option. **Never `allow_always`**, even when the
+   agent offers it;
+5. no gate, no `allow_once` option offered, no queue for an APPROVE, a
+   timeout, a denial, or any failure along the path → refusal. Fail closed
+   at every step.
 
 The driver answers with a selection of the agent's OWN options (the
 schema's contract), never an invented option id.
@@ -64,7 +75,11 @@ schema's contract), never an invented option id.
 The far side is REAL code: the TCK's conforming v2 fixture agent
 (Apache-2.0) is launched over stdio for the connection/driver round-trip
 tests. Permission routing uses the real SecurityGate and ApprovalQueue:
-an ask reaches the queue approve-once; a denial selects `reject_once`; an
-approval selects `allow_once` (never `allow_always`); no gate / no queue
-refuses. The registry's refusals and the machine-session hard disable are
-pinned, and the shipped template keeps the registry empty and ACP off.
+a grant-covered ask is answered `allow_once` with NO queue entry and an
+audit row naming the agent; an uncovered ask reaches the queue
+approve-once; a DENY (a `denied_commands` entry) refuses even when a grant
+would match it; an approval selects `allow_once` (never `allow_always`);
+no gate refuses, and an APPROVE with no queue refuses while a gate ALLOW
+without a queue still answers. The registry's refusals and the
+machine-session hard disable are pinned, and the shipped template keeps
+the registry empty and ACP off.

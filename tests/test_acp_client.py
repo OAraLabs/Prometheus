@@ -177,7 +177,7 @@ def _permission_params(command="rm -rf /tmp/x"):
 
 
 @pytest.mark.asyncio
-async def test_a_command_ask_goes_to_the_owners_queue_and_never_auto_allows(tmp_path):
+async def test_an_uncovered_ask_goes_to_the_owners_queue(tmp_path):
     gate, queue = _gate_and_queue(tmp_path)
     driver = OutsideAgentDriver(OutsideAgent(name="x", command=("true",)),
                                 gate=gate, approval_queue=queue)
@@ -217,13 +217,71 @@ async def test_no_gate_refuses_with_the_reject_option(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_no_queue_refuses_even_when_the_gate_would_allow(tmp_path):
-    gate, _ = _gate_and_queue(tmp_path, mode="autonomous")
+async def test_an_approve_with_no_queue_refuses_but_a_gate_allow_answers(tmp_path):
+    # APPROVE tier, no queue to ask: fail closed.
+    gate, _ = _gate_and_queue(tmp_path)
     driver = OutsideAgentDriver(OutsideAgent(name="x", command=("true",)), gate=gate)
     answer = await driver._answer_permission(_permission_params())
-    assert answer["outcome"]["outcome"] in ("selected", "cancelled")
-    if answer["outcome"]["outcome"] == "selected":
-        assert answer["outcome"]["optionId"] == "deny"
+    assert answer["outcome"] == {"outcome": "selected", "optionId": "deny"}
+    # ALLOW tier needs no queue: the gate's own allow IS the answer.
+    from prometheus.permissions.checker import Grant
+    gate.add_grant(Grant(kind="command_prefix", value="rm -rf /tmp/x", tool_name="bash"))
+    answer = await driver._answer_permission(_permission_params())
+    assert answer["outcome"] == {"outcome": "selected", "optionId": "allow"}
+
+
+@pytest.mark.asyncio
+async def test_a_grant_covered_ask_is_answered_directly_with_no_queue_entry(tmp_path):
+    from prometheus.permissions.checker import Grant
+    gate, queue = _gate_and_queue(tmp_path)
+    gate.add_grant(Grant(kind="command_prefix", value="rm -rf /tmp/x", tool_name="bash"))
+    driver = OutsideAgentDriver(OutsideAgent(name="claude", command=("true",)),
+                                gate=gate, approval_queue=queue)
+    answer = await asyncio.wait_for(driver._answer_permission(_permission_params()), 5)
+    assert answer["outcome"] == {"outcome": "selected", "optionId": "allow"}
+    assert not queue.pending, "a gate ALLOW must not reach the owner's queue"
+    # Audited like any gate-allowed call, with a row NAMING the outside agent.
+    rows = gate._audit.query_recent(limit=20, tool_name="bash")
+    agent_rows = [r for r in rows if r.user_id == "acp-agent:claude"]
+    assert agent_rows, "no audit row names the outside agent the allow answered"
+    assert "claude" in agent_rows[0].reason
+    from prometheus.permissions.audit import AuditDecision
+    assert agent_rows[0].decision == AuditDecision.ALLOW
+
+
+@pytest.mark.asyncio
+async def test_a_deny_refuses_even_when_a_grant_would_match(tmp_path):
+    from prometheus.permissions.checker import Grant
+    gate, queue = _gate_and_queue(tmp_path)
+    gate._denied_commands.append("rm -rf /tmp/x")
+    gate.add_grant(Grant(kind="command_prefix", value="rm -rf /tmp/x", tool_name="bash"))
+    driver = OutsideAgentDriver(OutsideAgent(name="x", command=("true",)),
+                                gate=gate, approval_queue=queue)
+    answer = await asyncio.wait_for(driver._answer_permission(_permission_params()), 5)
+    assert answer["outcome"] == {"outcome": "selected", "optionId": "deny"}
+    assert not queue.pending
+
+
+@pytest.mark.asyncio
+async def test_a_gate_allow_never_selects_allow_always(tmp_path):
+    from prometheus.acp import types
+    from prometheus.permissions.checker import Grant
+    gate, queue = _gate_and_queue(tmp_path)
+    gate.add_grant(Grant(kind="command_prefix", value="rm -rf /tmp/x", tool_name="bash"))
+    driver = OutsideAgentDriver(OutsideAgent(name="x", command=("true",)),
+                                gate=gate, approval_queue=queue)
+    params = types.RequestPermissionRequest.model_validate({
+        "sessionId": "s", "title": "run a command",
+        "subject": {"type": "command", "command": "rm -rf /tmp/x", "cwd": "/tmp"},
+        "options": [
+            {"optionId": "always", "name": "Always", "kind": "allow_always"},
+            {"optionId": "deny", "name": "Deny", "kind": "reject_once"},
+        ],
+    }).model_dump(by_alias=True, exclude_none=True)
+    answer = await asyncio.wait_for(driver._answer_permission(params), 5)
+    # No allow_once offered: refuse — never ride the allow_always option.
+    assert answer["outcome"] == {"outcome": "selected", "optionId": "deny"}
+    assert not queue.pending
 
 
 def test_shipped_template_keeps_the_registry_empty_and_acp_off():

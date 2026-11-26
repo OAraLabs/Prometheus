@@ -3,15 +3,18 @@
 The driver's shape: initialize (v2 only), session/new, session/prompt,
 session/cancel; the agent's ``session/update`` notifications stream to an
 observer; the agent's ``session/request_permission`` requests go through
-THE SAME GATE as Prometheus's own tool calls:
+THE SAME GATE as Prometheus's own tool calls — exactly what Prometheus's
+own calls get (D13 as written):
 
-- the gate evaluates the request in its STRICTEST mode (cautious: every
-  shell command and file write asks) — the outside agent runs ask-every-time;
-- an ALLOW the gate would auto-approve is still put to the owner's approval
-  queue when the gate says APPROVE; anything the gate escalates goes to
-  Beacon through the queue, never answered here;
-- a DENY (or a timeout, or no queue) answers the agent with a rejection —
-  fail closed, the agent MUST NOT proceed;
+- a gate ALLOW (a grant covers it, an allowlisted read, …) answers the
+  agent's ``allow_once`` option DIRECTLY, no queue — audited like any
+  gate-allowed call, with a row naming the outside agent it answered;
+- a gate APPROVE (needs confirmation) goes to the owner's approval queue,
+  approve-once; anything the gate escalates goes to Beacon through the
+  queue, never answered here;
+- a DENY (or a timeout, no gate, no ``allow_once`` option, or a queue
+  error) answers the agent with a rejection — fail closed, the agent
+  MUST NOT proceed;
 - the driver never answers with an ``allow_always`` option: a driven
   agent's consent is per-call, like a spawned worker's.
 
@@ -38,9 +41,6 @@ from prometheus.memory.session_kind import is_machine_session
 
 log = logging.getLogger(__name__)
 
-#: The strictest named mode: every shell command and file write asks.
-STRICTEST_MODE = "cautious"
-
 UpdateObserver = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
@@ -51,10 +51,10 @@ class DriverRefused(Exception):
 class OutsideAgentDriver:
     """One driven session with one outside agent.
 
-    ``gate`` is a SecurityGate-like object (``evaluate`` + ``request_approval``
-    via its queue); ``approval_queue`` is the owner's queue the escalated
-    requests go to. Both are REQUIRED to answer a permission request with
-    anything but a refusal — a driver with no gate refuses everything.
+    ``gate`` is a SecurityGate-like object (``evaluate``); ``approval_queue``
+    is the owner's queue the APPROVE-tier requests go to. A driver with no
+    gate refuses everything; a gate ALLOW is answered directly (audited),
+    but an APPROVE with no queue to ask refuses — fail closed.
     """
 
     def __init__(
@@ -153,12 +153,18 @@ class OutsideAgentDriver:
     async def _answer_permission(self, params: dict[str, Any] | None) -> dict[str, Any]:
         """The agent's permission request, through the SAME gate.
 
-        Every answer is a selection of one of the agent's OWN options (the
-        schema's contract) — never an invented option id. Allow answers pick
-        an ``allow_once`` option only; a driven agent's consent is per-call.
-        No gate, no queue, a DENY, a timeout or an escalation the owner has
-        not answered: the rejection option, or ``cancelled`` when the agent
+        Exactly what Prometheus's own tool calls get (D13 as written):
+        a gate ALLOW (a grant covers it, an allowlisted read, …) answers the
+        agent's ``allow_once`` option DIRECTLY — no queue, audited like any
+        gate-allowed call, naming the outside agent. A gate APPROVE (needs
+        confirmation) goes to the owner's queue, approve-once. A DENY, no
+        gate, no ``allow_once`` option offered, a queue error or an unanswered
+        escalation: the rejection option, or ``cancelled`` when the agent
         offered none. Fail closed.
+
+        Every answer is a selection of one of the agent's OWN options (the
+        schema's contract) — never an invented option id, and NEVER
+        ``allow_always``: a driven agent's consent is per-call.
         """
         req = types.RequestPermissionRequest.model_validate(params or {})
         options = req.options
@@ -184,13 +190,20 @@ class OutsideAgentDriver:
             return _refuse()
         if not decision.allowed and not decision.requires_confirmation:
             return _refuse()               # DENY tier: never proceeds
-        # ALLOW or APPROVE: both go to the owner's queue. The outside agent
-        # runs ask-every-time; the gate's auto-allow is not consent here.
-        if self._queue is None:
-            return _refuse()
         allow = next((o for o in options if _option_kind(o) == "allow_once"), None)
         if allow is None:
             return _refuse()               # no per-call allow offered: nothing to consent to
+        if decision.allowed:
+            # Gate ALLOW: the same call Prometheus itself would run without a
+            # prompt. The gate's evaluate() already wrote its ALLOW audit row;
+            # this row names the OUTSIDE AGENT the allow answered, so the
+            # record says who ran it, not just what was allowed.
+            self._audit_agent_allow(tool_name, decision.reason, command)
+            return {"outcome": {"outcome": "selected", "optionId": _option_id(allow)}}
+        # Gate APPROVE: the owner's queue, approve-once — a driven agent's
+        # consent is per-call, like a spawned worker's.
+        if self._queue is None:
+            return _refuse()
         from prometheus.permissions.approval_queue import ApprovalResult
         try:
             result = await self._queue.request_approval(
@@ -205,6 +218,30 @@ class OutsideAgentDriver:
         if result != ApprovalResult.APPROVED:
             return _refuse()
         return {"outcome": {"outcome": "selected", "optionId": _option_id(allow)}}
+
+    def _audit_agent_allow(self, tool_name: str, reason: str, command: str | None) -> None:
+        """One audit row naming the outside agent a gate-ALLOW answered.
+
+        Best-effort like every audit write: a logger that cannot write must
+        not refuse a call the gate allowed. The gate's own ALLOW row (written
+        by evaluate) carries the decision; this one carries the asker.
+        """
+        audit = getattr(self._gate, "_audit", None)
+        if audit is None:
+            return
+        try:
+            from prometheus.permissions.audit import AuditDecision
+            from prometheus.permissions.modes import TrustLevel
+            audit.log(
+                tool_name=tool_name,
+                decision=AuditDecision.ALLOW,
+                trust_level=TrustLevel.AUTO,  # the gate allowed it without a person
+                reason=f"outside agent {self._agent.name!r} answered allow_once: {reason}",
+                tool_input=command,
+                user_id=f"acp-agent:{self._agent.name}",
+            )
+        except Exception:  # noqa: BLE001 - audit is best-effort
+            log.warning("acp driver: could not audit the agent allow", exc_info=True)
 
 
 def _option_kind(option: Any) -> str:
