@@ -1806,7 +1806,8 @@ acp:
   # Outside agents Prometheus may DRIVE as an ACP client (the registry ships
   # EMPTY; each entry is an explicit operator grant, like a paired device).
   # A driven agent's permission requests go through the same gate as
-  # Prometheus's own tool calls, in its strictest ask-every-time mode;
+  # Prometheus's own tool calls: a gate ALLOW answers the agent directly
+  # (audited, naming the agent), a gate APPROVE asks the owner approve-once;
   # nothing outside this registry launches. Example:
   #   clients:
   #     claude-code:

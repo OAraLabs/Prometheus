@@ -32,9 +32,11 @@ class OutsideAgent:
     """One allowlisted outside agent.
 
     ``command`` is the argv the driver launches (a list, never a shell
-    string). ``strictest`` is not a flag: the driver ALWAYS runs the gate in
-    its strictest ask-every-time mode for a driven agent — the field exists
-    so a future relaxation is a visible, reviewed change, not a default.
+    string). The driver evaluates every ask through the SAME gate as
+    Prometheus's own tool calls (D13): a gate ALLOW is answered directly
+    (audited, naming the agent); a gate APPROVE goes to the owner's queue,
+    approve-once. Registering an agent here is the operator's grant to
+    LAUNCH it — never a grant to skip the gate.
     """
 
     name: str

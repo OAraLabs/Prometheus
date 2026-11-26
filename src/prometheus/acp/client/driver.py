@@ -259,8 +259,8 @@ def _subject_tool_and_command(req: Any) -> tuple[str, str | None]:
 
     A command subject maps to ``bash`` with the command line; a tool-call
     subject maps to the tool call's title (the gate's own name matching is
-    exact, so an unknown name evaluates under the strictest mode's rules
-    for an unnamed write — never auto-allowed).
+    exact, so an unknown name evaluates under the gate's rules for an
+    unnamed write — never assumed read-only, never auto-allowed by name).
     """
     subject = getattr(req, "subject", None)
     if subject is None:

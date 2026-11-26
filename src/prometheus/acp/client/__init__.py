@@ -4,9 +4,9 @@ Prometheus as an ACP CLIENT: it launches an outside agent (Claude Code first)
 as a subprocess speaking ACP v2 over stdio, sends prompts, streams the
 agent's updates, and answers the agent's permission requests THROUGH THE
 SAME GATE as Prometheus's own tool calls. Nothing the outside agent asks
-bypasses the gate; anything the gate would escalate goes to Beacon, and the
-outside agent runs in its strictest ask-every-time mode (the approval rule,
-decided 2026-11-25).
+bypasses the gate: a gate ALLOW answers the agent's allow_once directly
+(audited, naming the agent); a gate APPROVE goes to the owner's queue,
+approve-once; anything the gate escalates goes to Beacon (D13 as written).
 
 Layers:
 - ``connection`` — the client half of the NDJSON JSON-RPC connection:
