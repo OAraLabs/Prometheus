@@ -19,6 +19,7 @@ from typing import Any
 from uuid import uuid4
 
 from prometheus.engine.tool_context import RUN_SESSION
+from prometheus.permissions import approver as _approver
 from prometheus.permissions.approver import Approver
 from prometheus.permissions.argument_view import (
     MAX_ARGUMENTS,
@@ -971,6 +972,24 @@ class ApprovalQueue:
         action = self.pending.get(request_id)
         if action is None or request_id in self._finished:
             # Gone, or already answered and waiting for its waiter to pop it: a second answer resolves nothing.
+            return False
+        # ACP IS A LOWER-TRUST CHANNEL (the approval rule, decided 2026-11-25).
+        # A paired ACP client may approve ordinary actions; anything CRITICAL
+        # (permissions/critical.py — desktop, hold lifts, cut arguments, long
+        # descriptions, the owner's critical lists) is answered only from a
+        # paired Beacon device or the owner's chat, never over ACP. Refused
+        # HERE, in the one queue every surface reaches, so no route can forget
+        # it; the request stays PENDING for a person to answer.
+        if by.kind == _approver.ACP and is_critical(action):
+            logger.warning("approval %s: refused a CRITICAL approval over ACP from %s", request_id, by.label)
+            return False
+        # ACP APPROVALS ARE ONCE ONLY (D13 amended 2026-11-26). An ACP answer
+        # never carries a lasting scope and never creates a remembered grant:
+        # lasting grants come only from Beacon or the owner's chat. Refused
+        # here, before any mutation, so no surface can mint or persist a grant
+        # from an ACP answer — the request stays PENDING for a person.
+        if by.kind == _approver.ACP and ((scope is not None and scope != SCOPE_ONCE) or grant is not None):
+            logger.warning("approval %s: refused a lasting scope/grant over ACP from %s", request_id, by.label)
             return False
         action._result = ApprovalResult.APPROVED
         action._event.set()
