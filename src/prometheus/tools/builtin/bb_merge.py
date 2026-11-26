@@ -103,16 +103,25 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
 
 def _green_dependencies(repo: Path, board_ref: str, mission: str,
                         depends_on: list[str]) -> list[str]:
-    """Item ids whose post-merge result is NOT green on the board.
+    """Item ids whose post-merge result is NOT green-AND-landed on the board.
 
     Reads ``results/merged/<item-id>/`` entries from the board ref with
-    ``git show`` — never checks the board out. A result is green when its
-    JSON carries the daemon-computed ``passed: true`` and ``kind: merged``
-    (or, for a record predating ``passed``, ``exit_code == expected_exit_code``
-    with expected defaulting to 0). Missing, unreadable or non-green all
-    count as not-green: the refusal names them.
+    ``git show`` — never checks the board out. A dependency is satisfied
+    only when BOTH hold (review #2):
+
+    * the record is green (daemon-computed ``passed: true``, ``kind:
+      merged``; exit-code fallback for pre-``passed`` records), AND
+    * its ``tree`` (the merge commit it ran on) is an ANCESTOR of
+      ``refs/heads/bb/<mission>/integrate`` — the merge actually landed.
+      The record is written BEFORE the CAS advance, so a refused advance
+      leaves a green record for a merge that never landed; without the
+      ancestry check dependents would treat it as done.
+
+    Missing, unreadable, non-green or not-landed all count as not-green:
+    the refusal names them.
     """
     ref = f"{board_ref}/{mission}"
+    integrate = f"refs/heads/bb/{mission}/integrate"
     missing: list[str] = []
     for item in depends_on:
         path = f"results/merged/{item}"
@@ -132,11 +141,18 @@ def _green_dependencies(repo: Path, board_ref: str, mission: str,
                 continue
             if rec.get("kind") != "merged":
                 continue
-            if rec.get("passed") is True or (
+            is_green = rec.get("passed") is True or (
                 "passed" not in rec
                 and rec.get("exit_code") == rec.get("expected_exit_code", 0)
                 and rec.get("exit_code") is not None
-            ):
+            )
+            if not is_green:
+                continue
+            tree = rec.get("tree")
+            if not isinstance(tree, str) or not tree.strip():
+                continue
+            landed = _git(repo, "merge-base", "--is-ancestor", tree, integrate)
+            if landed.returncode == 0:
                 green = True
                 break
         if not green:

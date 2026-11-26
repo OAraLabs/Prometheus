@@ -57,10 +57,15 @@ def _worker_branch(repo: Path, name: str, file: str, text: str) -> None:
     _git(repo, "checkout", "-q", "main")
 
 
-def _board_result(repo: Path, mission: str, item: str, exit_code: int) -> None:
-    """Write a post-merge result onto an orphan board ref, no checkout."""
+def _board_result(repo: Path, mission: str, item: str, exit_code: int,
+                  tree: str | None = None) -> None:
+    """Write a post-merge result onto an orphan board ref, no checkout.
+    ``tree`` defaults to the integration tip (a LANDED merge); pass a
+    commit off the branch to model a refused advance."""
+    if tree is None:
+        tree = _git(repo, "rev-parse", f"bb/{mission}/integrate")
     rec = json.dumps({"item_id": item, "kind": "merged", "exit_code": exit_code,
-                      "tree": "x", "command": "true"})
+                      "passed": exit_code == 0, "tree": tree, "command": "true"})
     blob = subprocess.run(["git", "-C", str(repo), "hash-object", "-w", "--stdin"],
                           input=rec, capture_output=True, text=True, check=True).stdout.strip()
     ref = f"refs/blackboard/{mission}"
@@ -380,3 +385,69 @@ async def test_a_repo_outside_the_workspace_prompts_through_real_dispatch(tmp_pa
     })
     assert prompted, "bb_merge wrote outside the workspace WITHOUT prompting"
     assert any("outside workspace" in r for r in prompted), prompted
+
+
+@pytest.mark.asyncio
+async def test_a_green_record_for_a_never_landed_merge_does_not_satisfy_a_dependency(repo, tool, ctx):
+    """Review #2: the record is written BEFORE the CAS advance. A refused
+    advance leaves a green record for a merge that never landed — the
+    dependent must STILL be refused (green AND landed, ancestry check)."""
+    # a commit that is NOT on the integration branch (the refused merge)
+    _git(repo, "checkout", "-q", "-b", "bb/m1/i1/ghost")
+    (repo / "ghost.txt").write_text("never landed\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "the merge that never advanced the ref")
+    ghost = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "main")
+    # green record whose tree is the ghost commit — green but NOT landed
+    _board_result(repo, "m1", "m1.i1", exit_code=0, tree=ghost)
+    _worker_branch(repo, "bb/m1/i2/agent-a", "f.txt", "work\n")
+    res = await tool.execute(_args(repo, branch="bb/m1/i2/agent-a", item_id="m1.i2",
+                                 depends_on=["m1.i1"], mission="m1"), ctx)
+    assert res.is_error
+    assert "m1.i1" in res.output
+    assert _git(repo, "rev-parse", "bb/m1/integrate") == _git(repo, "rev-parse", "main")
+
+
+@pytest.mark.asyncio
+async def test_the_refused_advance_case_end_to_end(repo, tool, ctx):
+    """The exact scenario: merge A green but the ref moved mid-check (CAS
+    refuses); then a dependent merge B must be refused — A's green record
+    is on the board but A never landed."""
+    _worker_branch(repo, "bb/m1/i1/agent-a", "a.txt", "a\n")
+    import unittest.mock as mock
+
+    import prometheus.tools.builtin.bb_merge as bm
+
+    real_git = bm._git
+    moved = {"done": False}
+
+    def racing_git(r, *args):
+        # right before the final CAS update-ref of the integration branch,
+        # a concurrent writer advances it — the CAS must refuse
+        if (args[:1] == ("update-ref",) and len(args) > 1
+                and args[1] == "refs/heads/bb/m1/integrate" and not moved["done"]):
+            moved["done"] = True
+            _git(r, "checkout", "-q", "bb/m1/integrate")
+            (r / "concurrent.txt").write_text("other writer\n")
+            _git(r, "add", ".")
+            _git(r, "commit", "-q", "-m", "concurrent advance")
+            _git(r, "checkout", "-q", "main")
+        return real_git(r, *args)
+
+    with mock.patch.object(bm, "_git", racing_git):
+        res = await tool.execute(_args(repo), ctx)
+    assert res.is_error
+    body = json.loads(res.output)
+    assert body["merged"] is False
+    assert "moved during the check" in body["acceptance"]
+    # A's green record IS on the board (written before the CAS)
+    recs = _git(repo, "ls-tree", "-r", "--name-only", "refs/blackboard/m1",
+                "--", "results/merged/m1.i1/").splitlines()
+    assert recs, "the green record should exist even though the advance was refused"
+    # now the dependent: must be REFUSED — green but not landed
+    _worker_branch(repo, "bb/m1/i2/agent-a", "b.txt", "b\n")
+    res2 = await tool.execute(_args(repo, branch="bb/m1/i2/agent-a", item_id="m1.i2",
+                                  depends_on=["m1.i1"], mission="m1"), ctx)
+    assert res2.is_error
+    assert "m1.i1" in res2.output
