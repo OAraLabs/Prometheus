@@ -37,8 +37,6 @@ import httpx
 
 from prometheus.infra.voice_remote import RemoteVoice, probe_urls, remote_settings
 from prometheus.web.network import (
-    NoConfigFile,
-    PersistError,
     _edit_text,
     _set_nested,
     read_config_text,
