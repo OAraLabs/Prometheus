@@ -1657,11 +1657,11 @@ hooks: {}
 # Blackboard (coordination pillar) — experimental, off by default. The
 # protocol draft is docs/contracts/blackboard.md. run_events.enabled wires
 # the hooks/1.1 run-level events (D17): terminal coding-run task signals
-# become run.finished / run.failed for whatever hooks subscribe above
+# become run_finished / run_failed for whatever hooks subscribe above
 # (observe-only; a pillar's actions go through the daemon API under the
 # gate, never through a hook response). With it false nothing is
-# subscribed and no payload is built. The other run events (run.started,
-# worker.escalated, worker.context_pressure, merge.result, mission.amended)
+# subscribed and no payload is built. The other run events (run_started,
+# worker_escalated, worker_context_pressure, merge_result, mission_amended)
 # land with their own PRs; the names exist on HookEvent already.
 blackboard:
   run_events:

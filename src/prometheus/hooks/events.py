@@ -22,10 +22,10 @@ class HookEvent(str, Enum):
     # docs/contracts/blackboard.md section 8. Names exist so a subscription
     # can name them; emission sites land with their own PRs (run_events.py
     # ships the terminal coding-run translation, off by default).
-    RUN_STARTED = "run.started"
-    RUN_FINISHED = "run.finished"
-    RUN_FAILED = "run.failed"
-    WORKER_ESCALATED = "worker.escalated"
-    WORKER_CONTEXT_PRESSURE = "worker.context_pressure"
-    MERGE_RESULT = "merge.result"
-    MISSION_AMENDED = "mission.amended"
+    RUN_STARTED = "run_started"
+    RUN_FINISHED = "run_finished"
+    RUN_FAILED = "run_failed"
+    WORKER_ESCALATED = "worker_escalated"
+    WORKER_CONTEXT_PRESSURE = "worker_context_pressure"
+    MERGE_RESULT = "merge_result"
+    MISSION_AMENDED = "mission_amended"

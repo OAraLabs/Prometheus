@@ -46,13 +46,13 @@ def test_shipped_template_keeps_run_events_off():
 
 
 def test_the_seven_run_event_names_exist():
-    assert HookEvent("run.started") is HookEvent.RUN_STARTED
-    assert HookEvent("run.finished") is HookEvent.RUN_FINISHED
-    assert HookEvent("run.failed") is HookEvent.RUN_FAILED
-    assert HookEvent("worker.escalated") is HookEvent.WORKER_ESCALATED
-    assert HookEvent("worker.context_pressure") is HookEvent.WORKER_CONTEXT_PRESSURE
-    assert HookEvent("merge.result") is HookEvent.MERGE_RESULT
-    assert HookEvent("mission.amended") is HookEvent.MISSION_AMENDED
+    assert HookEvent("run_started") is HookEvent.RUN_STARTED
+    assert HookEvent("run_finished") is HookEvent.RUN_FINISHED
+    assert HookEvent("run_failed") is HookEvent.RUN_FAILED
+    assert HookEvent("worker_escalated") is HookEvent.WORKER_ESCALATED
+    assert HookEvent("worker_context_pressure") is HookEvent.WORKER_CONTEXT_PRESSURE
+    assert HookEvent("merge_result") is HookEvent.MERGE_RESULT
+    assert HookEvent("mission_amended") is HookEvent.MISSION_AMENDED
     # the 1.0 names are untouched
     assert HookEvent("pre_tool_use") is HookEvent.PRE_TOOL_USE
 
@@ -60,7 +60,7 @@ def test_the_seven_run_event_names_exist():
 def test_the_registry_loads_a_run_event_subscription():
     from prometheus.hooks.loader import load_hook_registry
     reg = load_hook_registry({
-        "run.finished": [{"type": "command", "command": "true"}],
+        "run_finished": [{"type": "command", "command": "true"}],
     })
     assert len(reg.get(HookEvent.RUN_FINISHED)) == 1
     # an unknown name still skips with a warning, as before
@@ -87,7 +87,7 @@ async def test_a_green_coding_run_emits_run_finished():
     event, payload = ex.execute.await_args.args
     assert event is HookEvent.RUN_FINISHED
     assert payload["facts"]["run_id"] == "c1"
-    assert payload["event"] == "run.finished"
+    assert payload["event"] == "run_finished"
 
 
 @pytest.mark.asyncio
@@ -153,7 +153,7 @@ async def test_started_is_explicit_and_not_called_by_the_terminal_path():
 
 @pytest.mark.asyncio
 async def test_an_operator_hook_receives_the_payload_through_the_real_executor(tmp_path):
-    """The whole path with the REAL executor: a run.finished command hook
+    """The whole path with the REAL executor: a run_finished command hook
     writes the payload it got; the env-var contract is the same one every
     operator hook uses ($ARGUMENTS / PROMETHEUS_HOOK_PAYLOAD)."""
     import json
@@ -163,7 +163,7 @@ async def test_an_operator_hook_receives_the_payload_through_the_real_executor(t
 
     out = tmp_path / "payload.json"
     reg = load_hook_registry({
-        "run.finished": [{
+        "run_finished": [{
             "type": "command",
             "command": f'printf "%s" "$PROMETHEUS_HOOK_PAYLOAD" > {out}',
         }],
@@ -178,5 +178,5 @@ async def test_an_operator_hook_receives_the_payload_through_the_real_executor(t
             break
         await asyncio.sleep(0.1)
     data = json.loads(out.read_text())
-    assert data["event"] == "run.finished"
+    assert data["event"] == "run_finished"
     assert data["facts"]["run_id"] == "c7"

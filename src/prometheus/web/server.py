@@ -1121,7 +1121,7 @@ def create_app(
     # the coding live-stream that reads the same terminal task signals, so it
     # does not depend on SENTINEL being enabled. With the key absent or false
     # nothing is subscribed; with it true, terminal coding-run signals become
-    # run.finished / run.failed for whatever hooks subscribe (observe-only).
+    # run_finished / run_failed for whatever hooks subscribe (observe-only).
     try:
         from prometheus.hooks.run_events import RunEventEmitter, run_events_enabled
 

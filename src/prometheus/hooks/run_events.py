@@ -12,18 +12,18 @@ What ships here (off by default, ``blackboard.run_events.enabled``):
   per-event lists stay empty unless an operator hook subscribes);
 - :class:`RunEventEmitter`, wired to the BackgroundTaskManager's existing
   terminal task signals. A coding run (``session_id`` ``coding:<id>``)
-  resolving emits ``run.finished`` (exit 0) or ``run.failed`` (anything
+  resolving emits ``run_finished`` (exit 0) or ``run_failed`` (anything
   else) through the SAME HookExecutor operator hooks already use — one
   payload, one env-var contract ($ARGUMENTS / PROMETHEUS_HOOK_PAYLOAD).
 
 What does NOT ship here (named, not faked):
 
-- ``run.started`` at launch: the launch site (POST /api/code) does not
+- ``run_started`` at launch: the launch site (POST /api/code) does not
   yet carry mission/item facts; the emitter exposes ``started()`` for
   that wiring, and nothing calls it until the roadmap pieces exist.
-- ``worker.escalated``, ``worker.context_pressure``: their facts live in
+- ``worker_escalated``, ``worker_context_pressure``: their facts live in
   the agent loop's turn path; wiring them is the loop-side slice (B8).
-- ``merge.result``, ``mission.amended``: the merge tool and the Beacon
+- ``merge_result``, ``mission_amended``: the merge tool and the Beacon
   amendment route do not exist yet (one PR each, blackboard.md §12).
 - the pillar transport: no pillar seam is merged (wp35-instinct-shadow
   is unreachable from this machine). When it lands, these events ride
@@ -122,7 +122,7 @@ class RunEventEmitter:
             log.warning("run-event emission failed", exc_info=True)
 
     async def started(self, *, run_id: str, facts: dict[str, Any]) -> None:
-        """``run.started`` — for the launch-site wiring (not called yet).
+        """``run_started`` — for the launch-site wiring (not called yet).
 
         Kept explicit so the launch PR has one place to call; nothing in
         this PR invokes it, and the docstring says so rather than
@@ -139,4 +139,4 @@ class RunEventEmitter:
                 "content": {},
             })
         except Exception:  # noqa: BLE001
-            log.warning("run.started emission failed", exc_info=True)
+            log.warning("run_started emission failed", exc_info=True)
