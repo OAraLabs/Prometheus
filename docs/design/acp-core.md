@@ -100,14 +100,14 @@ restart needs no mapping table.
 ### Refusals (fail closed)
 
 - Foreign session ids (anything not `acp:`) → `-32002` session not found.
-- `idempotencyKey` longer than **120** chars → `-32602`, refused BY NAME. The
-  schema allows 255; the stored claim is `acp-key:` + key in the daemon's
-  128-char client-id column, so the KEY must fit 128 − 8 = 120. Checking the
-  key against 128 instead would accept 121–128-char keys whose claim the
-  store then silently drops — idempotency lost without a word. Truncating
-  would merge distinct submissions, so the edge refuses by name. Widening
-  the storage (263 chars, or a dedicated column) is a separate migration PR,
-  before the agent endpoint; a test pins the 120/121/128 boundary.
+- `idempotencyKey` outside the schema's **1..255** range → `-32602`, refused
+  BY NAME, never truncated (truncation would merge distinct submissions).
+  The stored claim is `acp-key:` + key; the store's writer guard caps stored
+  claims at 263 (`CLIENT_ID_STORAGE_MAX`, D15 — a plain TEXT column, the
+  guard IS the migration), so 255 + 8 = 263 fits and the full schema range
+  round-trips. Tests pin the 120/121/128/255 retry boundary and the 0/256/300
+  refusals. (Before D15 landed the edge refused keys over 120 by name; that
+  refusal is lifted now that the storage carries them.)
 - `messageId` is the durable SQLite rowid. `lcm_messages` has no INTEGER
   PRIMARY KEY, so rowid stability across the purge path's VACUUM is a
   practical property, not a promised one; a test runs the REAL purge and
