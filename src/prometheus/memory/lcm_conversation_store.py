@@ -7,10 +7,13 @@ messages as compacted, uncompacted counts).
 
 from __future__ import annotations
 
+import functools
 import logging
 import sqlite3
+import threading
 import time
 from collections.abc import Iterable
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -93,6 +96,31 @@ def _is_turn_key_conflict(exc: sqlite3.IntegrityError) -> bool:
 #: gives its own message; the daemon keeps one in memory per recent send and one stored row per message, so it is bounded.
 CLIENT_MSG_ID_MAX = 128
 
+#: The longest value stored in ``message_client_ids.client_msg_id``. Wider than
+#: the wire cap above because a stored claim can carry a namespace prefix: an
+#: ACP idempotency claim is ``acp-key:`` + a schema-legal key of up to 255 chars
+#: (263 total). The wire cap for typed chat is unchanged; this is storage only.
+#: A value longer than this is still refused by the writer — never truncated.
+CLIENT_ID_STORAGE_MAX = 263
+
+
+def _serialized_write(fn):
+    """Hold the store's write lock for the WHOLE method.
+
+    One connection means one transaction state: a bare write on another
+    thread must not execute (or commit) inside a transaction() unit it does
+    not own — its commit would end the unit early and make the unit's
+    rollback useless, and the unit's rollback would discard its uncommitted
+    row. Taking the lock for the whole method (not just the commit point)
+    excludes both. Re-entrant: a transaction() unit calling these methods
+    already holds the lock and is not blocked by itself.
+    """
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with self._tx_lock:
+            return fn(self, *args, **kwargs)
+    return wrapper
+
 
 class LCMConversationStore:
     """SQLite store for conversation messages with FTS5 search.
@@ -108,7 +136,86 @@ class LCMConversationStore:
         self._db_path = db_path if db_path is not None else get_lcm_db_path()
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # ONE connection, ONE transaction state, MANY threads (check_same_thread
+        # is off). SQLite has a single transaction per connection, so a bare
+        # write on thread B COMMITS thread A's open unit — and A's later
+        # rollback then cannot undo it (reproduced 2026-11-25). The lock is
+        # therefore taken by EVERY write method for its whole run (the
+        # @_serialized_write decorator) and by transaction(): a bare writer
+        # waits for an open unit to finish before its write can even execute,
+        # and a unit's BEGIN/COMMIT/ROLLBACK never interleaves with another
+        # thread's statements. Re-entrant so a unit can call the store's own
+        # methods without deadlocking itself. The chat-projects store shares
+        # this lock (its SAVEPOINT writes run on the same connection).
+        self._tx_lock = threading.RLock()
+        self._tx_local = threading.local()
         self._apply_schema()
+
+    @contextmanager
+    def transaction(self):
+        """One ALL-OR-NOTHING write unit around a block of store calls.
+
+        For callers whose unit of work spans several methods (a lookup, an
+        insert, a side-table record) and must not interleave with another
+        writer NOR survive a crash half-done:
+
+        - the re-entrant lock is held for the WHOLE unit, and every write
+          METHOD takes it for its whole run too (@_serialized_write) — so a
+          plain store call on another thread waits until the unit ends
+          before its write can even execute (one connection means one
+          transaction state; a bare commit would end the unit early and
+          make its rollback useless, and the unit's rollback would discard
+          the bare writer's uncommitted row);
+        - BEGIN IMMEDIATE takes the database write lock up front, so another
+          CONNECTION to the file waits rather than slipping between steps;
+        - while the block runs on THIS thread, the store's own ``commit()``
+          calls are suppressed (sqlite3's commit is unconditional and would
+          end the explicit transaction). The block's writes land together at
+          the final COMMIT, or not at all: any exception rolls the whole
+          unit back.
+
+        Suppression is per-thread and re-entrant: a nested transaction() on
+        the same thread joins the outer unit. A bare method call on ANOTHER
+        thread does NOT join the unit — it blocks on the write lock until
+        the unit commits or rolls back, then writes and commits on its own.
+        That exclusion is the design; "a bare call commits into the open
+        transaction" was the bug.
+
+        READS DO NOT TAKE THE LOCK: another thread's read can see the unit's
+        UNCOMMITTED rows while it is open (one connection — its reads share
+        the transaction), and those rows vanish if the unit rolls back. A
+        reader that must not see half a unit reads after the unit ends, or
+        tolerates the disappearance. If more multi-step units appear, move
+        units to a dedicated connection so the file lock, not the shared
+        transaction state, does the excluding.
+        """
+        with self._tx_lock:
+            outermost = getattr(self._tx_local, "depth", 0) == 0
+            if outermost:
+                self._conn.execute("BEGIN IMMEDIATE")
+            self._tx_local.depth = getattr(self._tx_local, "depth", 0) + 1
+            try:
+                yield self._conn
+            except BaseException:
+                self._tx_local.depth -= 1
+                if outermost:
+                    self._conn.rollback()
+                raise
+            else:
+                self._tx_local.depth -= 1
+                if outermost:
+                    self._conn.commit()
+
+    def _commit(self) -> None:
+        """The store's commit point. A no-op while a transaction() block is
+        open on this thread — the block's final COMMIT lands every write
+        together. Everywhere else this is exactly ``self._conn.commit()``,
+        under the lock: a bare writer on another thread must not commit
+        (and thereby end) a unit this thread does not own."""
+        if getattr(self._tx_local, "depth", 0) > 0:
+            return
+        with self._tx_lock:
+            self._conn.commit()
 
     # ------------------------------------------------------------------
     # Schema
@@ -377,6 +484,7 @@ class LCMConversationStore:
         msg.session_id = session_id
         return self.insert_message(msg, append=append)
 
+    @_serialized_write
     def insert_message(self, msg: MessagePart, *, append: bool = False) -> str:
         """Insert a message and update the FTS5 index. Returns the message id.
 
@@ -458,7 +566,7 @@ class LCMConversationStore:
                 "INSERT OR REPLACE INTO lcm_messages_fts (rowid, content) VALUES (?, ?)",
                 (msg.row_id, content),
             )
-        self._conn.commit()
+        self._commit()
         if collision is not None:
             self._record_turn_index_collision(
                 msg.session_id, requested, msg.turn_index, collision
@@ -590,6 +698,7 @@ class LCMConversationStore:
         ).fetchall()
         return [self._row_to_message(r) for r in reversed(rows)]
 
+    @_serialized_write
     def mark_compacted(self, message_ids: list[str]) -> int:
         """Mark messages as compacted. Returns the number of rows affected."""
         if not message_ids:
@@ -599,7 +708,7 @@ class LCMConversationStore:
             f"UPDATE lcm_messages SET compacted = 1 WHERE id IN ({placeholders})",
             message_ids,
         )
-        self._conn.commit()
+        self._commit()
         return cur.rowcount
 
     def search(
@@ -1064,6 +1173,7 @@ class LCMConversationStore:
             "hidden_machine": machine_hidden,
         }
 
+    @_serialized_write
     def purge_session(self, session_id: str) -> dict[str, int]:
         """IRREVERSIBLY remove a session's content. The opposite of a tombstone.
 
@@ -1163,7 +1273,7 @@ class LCMConversationStore:
                 self._conn.execute(
                     "INSERT INTO lcm_summaries_fts (lcm_summaries_fts) VALUES ('optimize')"
                 )
-            self._conn.commit()
+            self._commit()
         finally:
             self._conn.execute(f"PRAGMA secure_delete = {'ON' if prior else 'OFF'}")
         # Reclaim the freed pages. Without this the overwritten space is still
@@ -1199,12 +1309,16 @@ class LCMConversationStore:
 
     def chat_projects(self) -> ChatProjectStore:
         """The chat projects store, on this connection (``projects/store.py``): filing a session changes its
-        membership and its workspace binding in one transaction. Made once, then kept."""
+        membership and its workspace binding in one transaction. Made once, then kept.
+
+        It shares the store's write lock: its SAVEPOINT writes run on the SAME
+        connection, so they must not execute inside a transaction() unit they
+        do not own (one connection, one transaction state)."""
         store = getattr(self, "_chat_projects", None)
         if store is None:
             from prometheus.projects.store import ChatProjectStore
 
-            store = self._chat_projects = ChatProjectStore(self._conn)
+            store = self._chat_projects = ChatProjectStore(self._conn, write_lock=self._tx_lock)
         return store
 
     def _table_exists(self, name: str) -> bool:
@@ -1214,6 +1328,7 @@ class LCMConversationStore:
             ).fetchone()
         )
 
+    @_serialized_write
     def tombstone_session(self, session_id: str) -> None:
         """Durably forget a session: hide it from :meth:`list_sessions`.
 
@@ -1226,12 +1341,13 @@ class LCMConversationStore:
             " VALUES (?, ?)",
             (session_id, time.time()),
         )
-        self._conn.commit()
+        self._commit()
 
     # ------------------------------------------------------------------
     # Session titles (GRAFT-MOBILE-BRIDGE 7)
     # ------------------------------------------------------------------
 
+    @_serialized_write
     def set_session_title(self, session_id: str, title: str) -> None:
         """Set (or replace) a session's display title. Last write wins.
 
@@ -1250,8 +1366,9 @@ class LCMConversationStore:
                 " VALUES (?, ?, ?)",
                 (session_id, clean, time.time()),
             )
-        self._conn.commit()
+        self._commit()
 
+    @_serialized_write
     def set_session_pinned(self, session_id: str, pinned: bool) -> None:
         """Pin or unpin a session. Unpinning DELETES the row.
 
@@ -1269,7 +1386,7 @@ class LCMConversationStore:
             self._conn.execute(
                 "DELETE FROM session_pins WHERE session_id = ?", (session_id,)
             )
-        self._conn.commit()
+        self._commit()
 
     def is_session_pinned(self, session_id: str) -> bool:
         """True when a pin row exists for this session."""
@@ -1278,6 +1395,7 @@ class LCMConversationStore:
         ).fetchone()
         return row is not None
 
+    @_serialized_write
     def fork_session(self, origin_session: str, at_rowid: int, new_session_id: str) -> dict:
         """Copy `origin_session`'s history up to and including `at_rowid` into a new session.
 
@@ -1328,7 +1446,7 @@ class LCMConversationStore:
             " (session_id, origin_session, origin_rowid, created_at) VALUES (?, ?, ?, ?)",
             (new_session_id, origin_session, int(at_rowid), created),
         )
-        self._conn.commit()
+        self._commit()
         return {
             "session_id": new_session_id,
             "origin_session": origin_session,
@@ -1360,6 +1478,7 @@ class LCMConversationStore:
         return [{"session_id": r["session_id"], "origin_rowid": r["origin_rowid"],
                  "created_at": r["created_at"]} for r in rows]
 
+    @_serialized_write
     def set_session_profile(self, session_id: str, profile: str) -> None:
         """Bind a session to an agent profile. Blank CLEARS the binding.
 
@@ -1384,8 +1503,9 @@ class LCMConversationStore:
                 " VALUES (?, ?, ?)",
                 (session_id, clean, time.time()),
             )
-        self._conn.commit()
+        self._commit()
 
+    @_serialized_write
     def set_session_workspace(self, session_id: str, path: str, *, set_by: str = "rest") -> None:
         """Bind a session to a working directory. Blank CLEARS the binding.
 
@@ -1411,8 +1531,9 @@ class LCMConversationStore:
                 " VALUES (?, ?, ?, ?)",
                 (session_id, clean, set_by, time.time()),
             )
-        self._conn.commit()
+        self._commit()
 
+    @_serialized_write
     def set_session_backend(self, session_id: str, key: str | None, *, set_by: str = "router") -> None:
         """Remember which local backend a session is pointed at (`/4090`,
         `mini:qwen2.5:7b-instruct`). None/blank CLEARS. Same shape and rules as
@@ -1428,7 +1549,7 @@ class LCMConversationStore:
                 " VALUES (?, ?, ?, ?)",
                 (session_id, clean, set_by, time.time()),
             )
-        self._conn.commit()
+        self._commit()
 
     def get_session_backend(self, session_id: str) -> str | None:
         row = self._conn.execute(
@@ -1469,6 +1590,7 @@ class LCMConversationStore:
     # Optimistic-row correlation (audit P9.6 / Beacon#144)
     # ------------------------------------------------------------------
 
+    @_serialized_write
     def set_message_client_id(
         self, session_id: str, row_id: int | None, client_msg_id: str | None
     ) -> None:
@@ -1479,27 +1601,45 @@ class LCMConversationStore:
         retire a stranded optimistic row after a missed echo, and must never cost the turn
         itself -- so it no-ops on a blank id or a missing rowid rather than raising.
 
+        The length guard is the STORAGE cap (263), not the typed-chat wire cap (128): a
+        namespaced claim (``acp-key:`` + a 255-char key) is longer than a wire id by design.
+        The wire surfaces keep their own 128-char refusal. A value over the storage cap is
+        still refused here — never truncated. This method itself returns silently for an
+        over-cap value (best-effort by contract); "never accepted-then-silently-dropped"
+        holds because the CALLERS refuse over-cap values by name before reaching it (the
+        ACP edge refuses keys whose stored form would exceed the cap; the wire routes 400).
+
         INSERT OR REPLACE, not INSERT OR IGNORE: a rowid is durable and unique, so a second write
         for the same rowid is a correction of the first, and keeping the stale id would strand
         the row that actually correlates to it.
+
+        A NAMESPACED claim (``acp-key:…``) is stored BYTE-EXACT: the schema's
+        idempotency key is opaque and case-sensitive, and whitespace is part
+        of it. Stripping it broke idempotency both ways — a key ending in a
+        space never deduped (the stored claim lost the space the lookup
+        compares), and two DIFFERENT keys that strip to the same string
+        collided into one. Wire-typed ids keep their historical trim.
         """
-        cid = (client_msg_id or "").strip()
-        if not cid or len(cid) > CLIENT_MSG_ID_MAX or row_id is None:
+        raw = client_msg_id or ""
+        cid = raw if raw.startswith("acp-key:") else raw.strip()
+        if not cid or len(cid) > CLIENT_ID_STORAGE_MAX or row_id is None:
             return
         self._conn.execute(
             "INSERT OR REPLACE INTO message_client_ids"
             " (session_id, row_id, client_msg_id, created_at) VALUES (?, ?, ?, ?)",
             (session_id, int(row_id), cid, time.time()),
         )
-        self._conn.commit()
+        self._commit()
 
     def has_message_client_id(self, session_id: str, client_msg_id: str | None) -> bool:
         """Whether a message the client named ``client_msg_id`` is already stored in ``session_id``.
 
         What lets ``POST /api/chat/send`` treat a retry as the same message after a restart, when its in-memory
-        record of ids it has accepted is gone. A blank id is never "seen".
+        record of ids it has accepted is gone. A blank id is never "seen". A namespaced claim
+        (``acp-key:…``) is matched BYTE-EXACT, like its write: whitespace is part of the opaque key.
         """
-        cid = (client_msg_id or "").strip()
+        raw = client_msg_id or ""
+        cid = raw if raw.startswith("acp-key:") else raw.strip()
         if not cid:
             return False
         row = self._conn.execute(

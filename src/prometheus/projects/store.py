@@ -151,11 +151,15 @@ class VisibleProject:
 class ChatProjectStore:
     """The store, on the conversation store's connection (``LCMConversationStore.chat_projects()``)."""
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, write_lock: threading.RLock | None = None) -> None:
         # The tables are made with the conversation store's own schema (LCMConversationStore.__init__), so building
         # this object never commits anything mid-way through someone else's work.
         self._conn = conn
-        self._lock = threading.RLock()
+        # The CONNECTION OWNER's lock when one is passed (LCMConversationStore.chat_projects()):
+        # one connection means one transaction state, so a SAVEPOINT write here must not run
+        # inside a transaction() unit another thread owns. Without an owner (a standalone
+        # connection) this store's own lock is the whole story, as before.
+        self._lock = write_lock if write_lock is not None else threading.RLock()
 
     @contextmanager
     def _write(self) -> Iterator[None]:

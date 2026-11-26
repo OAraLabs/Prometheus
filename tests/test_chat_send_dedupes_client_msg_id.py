@@ -276,14 +276,17 @@ def test_the_length_is_counted_after_trimming():
 
 
 def test_the_store_records_and_answers_only_for_an_id_within_the_bound(tmp_path):
-    from prometheus.memory.lcm_conversation_store import CLIENT_MSG_ID_MAX
+    # The STORE bound is the storage cap (263), wider than the typed-chat wire
+    # cap (128): a namespaced ACP claim is acp-key: + up to 255 chars. The wire
+    # surfaces keep their own 128-char refusal (tested above and in the WS tests).
+    from prometheus.memory.lcm_conversation_store import CLIENT_ID_STORAGE_MAX
 
     store = LCMConversationStore(tmp_path / "lcm.db")
-    store.set_message_client_id("s1", 1, "x" * CLIENT_MSG_ID_MAX)
-    store.set_message_client_id("s1", 2, "y" * (CLIENT_MSG_ID_MAX + 1))
-    assert store.has_message_client_id("s1", "x" * CLIENT_MSG_ID_MAX)
-    assert not store.has_message_client_id("s1", "y" * (CLIENT_MSG_ID_MAX + 1))
-    assert store.get_message_client_ids("s1") == {1: "x" * CLIENT_MSG_ID_MAX}
+    store.set_message_client_id("s1", 1, "x" * CLIENT_ID_STORAGE_MAX)
+    store.set_message_client_id("s1", 2, "y" * (CLIENT_ID_STORAGE_MAX + 1))
+    assert store.has_message_client_id("s1", "x" * CLIENT_ID_STORAGE_MAX)
+    assert not store.has_message_client_id("s1", "y" * (CLIENT_ID_STORAGE_MAX + 1))
+    assert store.get_message_client_ids("s1") == {1: "x" * CLIENT_ID_STORAGE_MAX}
 
 
 @pytest.mark.parametrize("field,value", [
@@ -314,8 +317,8 @@ def test_the_other_names_the_table_keeps_are_bounded_too(field, limit):
 
 def test_an_over_long_id_is_never_stored_or_returned_in_history(tmp_path):
     """The WebSocket path refuses it before anything is stored; the store itself also records nothing for it."""
-    from prometheus.memory.lcm_conversation_store import CLIENT_MSG_ID_MAX
+    from prometheus.memory.lcm_conversation_store import CLIENT_ID_STORAGE_MAX
 
     store = LCMConversationStore(tmp_path / "lcm.db")
-    store.set_message_client_id("s1", 7, "z" * (CLIENT_MSG_ID_MAX + 1))
-    assert store.get_message_client_ids("s1") == {} and not store.has_message_client_id("s1", "z" * (CLIENT_MSG_ID_MAX + 1))
+    store.set_message_client_id("s1", 7, "z" * (CLIENT_ID_STORAGE_MAX + 1))
+    assert store.get_message_client_ids("s1") == {} and not store.has_message_client_id("s1", "z" * (CLIENT_ID_STORAGE_MAX + 1))
