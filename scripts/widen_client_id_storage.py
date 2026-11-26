@@ -59,6 +59,14 @@ if {write!r}:
     s = LCMConversationStore(db)
 assert s.has_message_client_id(sid, claim), "claim lost across reopen"
 assert claim in s.get_message_client_ids(sid).values()
+if not {write!r}:
+    # BACKWARD checks: the OLD writer refuses its own over-cap value (its guard
+    # is 128) without crashing or truncating, and ordinary ids still write beside
+    # the long claim.
+    s.set_message_client_id(sid, 999999, "z" * 263)
+    assert 999999 not in s.get_message_client_ids(sid), "old writer stored an over-cap value"
+    s.set_message_client_id(sid, 999998, "old-style-id")
+    assert s.has_message_client_id(sid, "old-style-id"), "ordinary write failed beside the long claim"
 n = len(s.list_sessions())
 s.close()
 print(f"ok: {{n}} sessions enumerable")
