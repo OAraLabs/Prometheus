@@ -266,3 +266,33 @@ def test_awkward_paths_round_trip_through_z_listing(repo):
                           f"refs/blackboard/m1:{awkward}"],
                          capture_output=True, text=True, check=True)
     assert out.stdout == '{"ok": true}'
+
+def test_the_configured_backend_is_used_when_none_passed(repo):
+    """Review #2 nit: the acceptance sandbox uses coding.sandbox_type —
+    the configured backend, same as Loop Manager's acceptance — not a
+    hardcoded process default."""
+    import prometheus.coding.sandbox as sb
+
+    seen = {}
+    real_create = sb.create_sandbox
+
+    def spy_create(root, **kw):
+        seen["backend"] = kw.get("backend")
+        return real_create(root, **kw)
+
+    class _Load:
+        def section(self, name):
+            return {"sandbox_type": "bwrap"} if name == "coding" else {}
+
+    import unittest.mock as mock
+    with mock.patch.object(sb, "create_sandbox", spy_create), \
+         mock.patch("prometheus.config.load.load_config_file", return_value=_Load()):
+        # bwrap is unavailable on this host -> create_sandbox raises; the
+        # point is the backend it was ASKED for, not availability.
+        try:
+            run_post_merge_acceptance(repo, item_id="m1.a",
+                                      integration_ref="bb/m1/integrate",
+                                      mission="m1", merge_id="backend")
+        except Exception:
+            pass
+    assert seen.get("backend") == "bwrap"
