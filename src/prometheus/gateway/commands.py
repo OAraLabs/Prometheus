@@ -2562,10 +2562,13 @@ def _pending_actions(queue: Any) -> list:
         # differently. Report "nothing pending" rather than raising out of a
         # chat command — and never guess at a shape we cannot read.
         return []
+    # A request that already has an answer is not pending, even while its waiter has yet to pop it.
+    finished = getattr(queue, "finished", None)
+    live = [a for rid, a in pending.items() if not (callable(finished) and finished(rid) is not None)]
     try:
-        return sorted(pending.values(), key=lambda a: getattr(a, "created_at", 0.0))
+        return sorted(live, key=lambda a: getattr(a, "created_at", 0.0))
     except TypeError:
-        return list(pending.values())
+        return live
 
 
 def _short(text: str, limit: int = 70) -> str:
