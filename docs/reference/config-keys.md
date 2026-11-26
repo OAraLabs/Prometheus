@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **469** of
+Every key in `config/prometheus.yaml.default` — **472** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -445,6 +445,9 @@ none either — the key is documented so its absence is visible.
 | `mcp` | *(section)* |
 | `mcp.rest_management` | `True` |
 | `hooks` | `{}` *(open map)* |
+| `blackboard` | *(section)* |
+| `blackboard.merge_tool` | *(section)* |
+| `blackboard.merge_tool.enabled` | `False` |
 | `evals` | *(section)* |
 | `evals.results_dir` | `~/.prometheus/eval_results` |
 | `evals.skip_network_tasks` | `True` |

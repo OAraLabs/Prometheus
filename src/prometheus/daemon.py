@@ -1105,6 +1105,18 @@ async def run_daemon(args: argparse.Namespace) -> bool:
     registry = build_tool_registry(
         security_cfg=security_config, memory_extraction=extraction_enabled(config))
 
+    # The blackboard merge tool (experimental, off by default). Registered
+    # only when blackboard.merge_tool.enabled is literally true; with it
+    # off the tool does not exist in the registry, exactly as today.
+    try:
+        from prometheus.tools.builtin.bb_merge import BbMergeTool, merge_tool_enabled
+
+        if merge_tool_enabled(config):
+            registry.register(BbMergeTool())
+            logger.info("Blackboard merge tool enabled (experimental)")
+    except Exception:
+        logger.warning("bb_merge registration failed", exc_info=True)
+
     # The read floor's state, said ONCE at boot. security.bash_confinement
     # ships "auto", so a host where the AppArmor profile did not verify runs
     # every model-written shell without it — the operator hears that now, at

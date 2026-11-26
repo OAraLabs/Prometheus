@@ -1654,6 +1654,19 @@ mcp:
   # Populated in the live config; empty here.
 hooks: {}
 
+# Blackboard (coordination pillar) — experimental, off by default. The
+# protocol draft is docs/contracts/blackboard.md. merge_tool.enabled
+# registers bb_merge: merges a worker branch bb/<mission>/<item>/<agent>
+# into the integration branch. The intent block (what/why) is REQUIRED as
+# an argument; dependencies must carry green post-merge results on the
+# board; a conflict is returned as a result, never resolved with a
+# strategy flag. Off: the tool is not registered and nothing changes. The
+# post-merge acceptance check is a separate piece; the tool never claims
+# acceptance ran. run_events (hooks/1.1) lands in its own PR.
+blackboard:
+  merge_tool:
+    enabled: false
+
 evals:
   results_dir: "~/.prometheus/eval_results"
   skip_network_tasks: true
