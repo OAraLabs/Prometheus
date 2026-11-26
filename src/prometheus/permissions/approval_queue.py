@@ -983,6 +983,14 @@ class ApprovalQueue:
         if by.kind == _approver.ACP and is_critical(action):
             logger.warning("approval %s: refused a CRITICAL approval over ACP from %s", request_id, by.label)
             return False
+        # ACP APPROVALS ARE ONCE ONLY (D13 amended 2026-11-26). An ACP answer
+        # never carries a lasting scope and never creates a remembered grant:
+        # lasting grants come only from Beacon or the owner's chat. Refused
+        # here, before any mutation, so no surface can mint or persist a grant
+        # from an ACP answer — the request stays PENDING for a person.
+        if by.kind == _approver.ACP and ((scope is not None and scope != SCOPE_ONCE) or grant is not None):
+            logger.warning("approval %s: refused a lasting scope/grant over ACP from %s", request_id, by.label)
+            return False
         action._result = ApprovalResult.APPROVED
         action._event.set()
         self._remember_end(request_id, "approved")

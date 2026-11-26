@@ -9,6 +9,9 @@ protocol core (framing, sessions) is `docs/design/acp-core.md` (PR #957).
 
 - An approval that arrives over ACP is a **lower-trust channel** than a
   paired Beacon device. An ACP client may approve **ordinary** actions.
+- **ACP approvals are ONCE ONLY** (D13 amended 2026-11-26): an ACP answer
+  never carries a lasting scope and never creates a remembered grant.
+  Lasting grants come only from Beacon or the owner's chat.
 - Anything **critical** (`permissions/critical.py`: desktop prompts, hold
   lifts, cut arguments, long descriptions, the owner's `push.critical_*`
   lists) can only be approved from a paired Beacon device or the owner's
@@ -34,6 +37,13 @@ early because a lower-trust channel tried.
 
 Denial is different: saying **no** narrows what may run, so an ACP client may
 deny anything, critical or not. The asymmetry is the point.
+
+The once-only rule sits in the same place, for the same reason: an ACP
+approve with scope `until-restart`/`always` (or any `here` form), or with a
+grant object, is refused in `approve()` before any mutation — so no surface
+can mint or persist a grant from an ACP answer. An ACP approve-once lands
+and writes nothing to config; a person's lasting scope still reaches the
+grant machinery unchanged.
 
 ## 2. The credential
 

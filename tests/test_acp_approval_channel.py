@@ -94,3 +94,56 @@ def test_acp_is_not_a_chat_kind_and_not_the_owner_gate():
     by = acp_client("client-1")
     assert by.kind == ACP
     assert by.not_the_owner is False
+
+
+# ── D13 amended 2026-11-26: ACP approvals are ONCE ONLY ─────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["until-restart", "always", "until-restart here", "always here"])
+async def test_acp_never_carries_a_lasting_scope(tmp_path, scope):
+    q = _queue(tmp_path)
+    _pending(q)
+    assert await q.approve(RID, by=acp_client("client-1"), scope=scope) is False
+    assert RID in q.pending  # still pending for a person
+    assert q.pending[RID]._result != ApprovalResult.APPROVED
+
+
+@pytest.mark.asyncio
+async def test_acp_never_creates_a_grant_even_with_once_scope(tmp_path):
+    q = _queue(tmp_path)
+    _pending(q)
+    assert await q.approve(RID, by=acp_client("client-1"), scope="once", grant=object()) is False
+    assert RID in q.pending
+
+
+@pytest.mark.asyncio
+async def test_acp_once_approval_writes_nothing_to_config(tmp_path):
+    """An ACP approve-once lands, and no grant is minted or persisted: the
+    gate's grant list stays empty and no grants file appears."""
+    import yaml
+
+    q = _queue(tmp_path)
+    _pending(q)
+    assert await q.approve(RID, by=acp_client("client-1"), scope="once") is True
+    gate = q._security_gate
+    assert list(getattr(gate, "_grants", {}) or {}) == []
+    # nothing grant-shaped was written anywhere under the tmp tree
+    written = [p for p in tmp_path.rglob("*") if p.is_file() and "grant" in p.name.lower()]
+    assert written == []
+    for p in tmp_path.rglob("*.yaml"):
+        data = yaml.safe_load(p.read_text()) or {}
+        assert "grants" not in data
+
+
+@pytest.mark.asyncio
+async def test_a_person_may_still_grant_a_lasting_scope(tmp_path):
+    """The refusal is the CHANNEL's: a device answer with a lasting scope
+    still reaches the grant path (it raises nothing here; the queue's own
+    scope handling runs as before)."""
+    q = _queue(tmp_path)
+    _pending(q)
+    # a device approve with 'always' must NOT be refused by the ACP rule;
+    # the queue's grant machinery runs (gate present, so no RuntimeError)
+    assert await q.approve(RID, by=Approver("device-token", "phone-1", "Phone"),
+                           scope="always") is True
