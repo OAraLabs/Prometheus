@@ -40,7 +40,7 @@ from prometheus.permissions.approval_queue import (
     ApprovalResult,
     PendingAction,
     _humanise_window,
-    is_desktop_request,
+    is_worker_request,
     new_request_id,
 )
 from prometheus.permissions.approver import Approver
@@ -147,11 +147,11 @@ class ComputerApprovalChannel(ApprovalQueue):
         action = self.pending.get(request_id)
         if action is None:
             return False
-        if not is_desktop_request(action):
-            # Not a desktop prompt: something else was filed in this queue (a worker's request, when nothing
-            # else is the surface's first queue). The computer-use person check is for DESKTOP prompts; this
-            # request is answered under its own rules (a worker's: a device token, ``approve_action``), so the
-            # base queue answers it, and it needs no computer-use mark.
+        if is_worker_request(action):
+            # POSITIVELY a worker's request (worker_task_id, set only by /api/workers/approvals): answered under
+            # its own rules (a device token, ``approve_action``), so the base queue answers it and it needs no
+            # computer-use mark. Anything ELSE keeps the person check — a desktop prompt filed without its
+            # task_id must fail CLOSED, not skip the check on a missing marker (review #2 on #968).
             return await super().approve(request_id, by=by, scope=scope, grant=grant)
         if (scope not in (None, SCOPE_ONCE)) or grant is not None:
             raise OnceOnly(
