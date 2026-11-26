@@ -237,3 +237,37 @@ async def test_an_unmarked_ordinary_request_in_a_channel_still_needs_a_person(tm
     by = approver.Approver(kind=approver.DEVICE, id=w.owner["id"])
     with pytest.raises(NotAPerson):
         await w.channel.approve("0rd1nary", by=by)
+
+
+@pytest.mark.asyncio
+async def test_worker_marker_plus_desktop_marker_keeps_the_person_check(tmp_path):
+    """Review #2 hardening nit: BOTH markers → the person check stays.
+    The skip is for worker-ONLY requests."""
+    from prometheus.computer.door import NotAPerson
+    from prometheus.permissions import approver
+
+    w = World(tmp_path, "computer")
+    action = PendingAction(request_id="b0thmark", tool_name="computer_click",
+                           description="click", task_id="t1", worker_task_id="a053720bf",
+                           once_only=True)
+    w.channel._register(action)
+    by = approver.Approver(kind=approver.DEVICE, id=w.owner["id"])
+    with pytest.raises(NotAPerson):
+        await w.channel.approve("b0thmark", by=by)
+    assert "b0thmark" in w.channel.pending
+
+
+@pytest.mark.asyncio
+async def test_worker_marker_plus_hold_marker_keeps_the_person_check(tmp_path):
+    from prometheus.computer.door import NotAPerson
+    from prometheus.permissions import approver
+
+    w = World(tmp_path, "default")
+    action = PendingAction(request_id="b0thmark", tool_name="device_hold",
+                           description="lift", hold_device_id="dev1", worker_task_id="a053720bf",
+                           once_only=True)
+    w.hold._register(action)
+    by = approver.Approver(kind=approver.DEVICE, id=w.owner["id"])
+    with pytest.raises(NotAPerson):
+        await w.hold.approve("b0thmark", by=by)
+    assert "b0thmark" in w.hold.pending
