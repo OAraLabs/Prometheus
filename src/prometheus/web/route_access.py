@@ -213,6 +213,9 @@ OPERATOR_ONLY: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/api/model"),
     ("PUT", "/api/model"),
     ("POST", "/api/model/check-key"),
+    # /api/speech/settings — the voice box's config; the owner's (the answer carries the box's address)
+    ("GET", "/api/speech/settings"),
+    ("PUT", "/api/speech/settings"),
     # /api/models
     ("GET", "/api/models"),
     ("GET", "/v1/models"),

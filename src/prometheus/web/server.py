@@ -7463,6 +7463,13 @@ def create_app(
 
     register_speech_routes(app, config=config, devices=_devices, auth_on=lambda: bool(_api_token))
 
+    # ── Voice settings: the voice box's config, through Prometheus only (docs/design/voice-settings.md) ────
+    # The operator's (GET too — the answer carries the box's address). Saved to the config file, applied live
+    # where possible; the box's address waits for a restart. Every attempt is audited.
+    from prometheus.web.voice_settings_routes import register_voice_settings_routes
+
+    register_voice_settings_routes(app, auth_on=lambda: bool(_api_token))
+
     # ── Voice events: wake / PTT envelopes from the OAra Voice front ends (Phase 1) ────
     # One door for every node; the origin comes from the credential (permissions/origins.py).
     from prometheus.web.voice_events import register_voice_event_route
