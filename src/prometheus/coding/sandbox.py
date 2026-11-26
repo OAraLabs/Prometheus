@@ -633,14 +633,23 @@ def clone_repo_for_sandbox(
     network_isolation: bool = False,
     image: str | None = None,
     allow_fallback: bool = False,
+    worktree: bool = False,
 ) -> Sandbox:
-    """Create the dedicated full clone and return a sandbox rooted in it.
+    """Create the dedicated run checkout and return a sandbox rooted in it.
 
-    A FULL ``git clone`` (not a worktree — spec decision: hard isolation
-    over disk savings) into ``dest_parent/name``. The clone shares nothing
-    writable with the source; the coding run's branch lives here.
+    Default: a FULL ``git clone`` (spec decision: hard isolation over disk
+    savings) into ``dest_parent/name``. The clone shares nothing writable
+    with the source; the coding run's branch lives here.
 
-    *backend* selects which sandbox wraps the clone — see
+    ``worktree=True`` (experimental, ``coding.worktree_per_run``): a
+    ``git worktree add --detach`` of the source instead — the run gets its
+    own checkout and branch, removed when the run completes (the caller
+    pairs it with :func:`remove_run_worktree`). The worktree shares the
+    source's object store and refs; the isolation is the checkout, not the
+    objects. Two runs in one repo no longer share a working tree. The
+    sandbox wrapper (cwd jail / bwrap / docker) is the same either way.
+
+    *backend* selects which sandbox wraps the checkout — see
     :func:`create_sandbox`. It defaults to ``"process"`` so existing callers
     are unchanged, but it must be threaded through from
     ``coding.sandbox_type``: this is the ONLY place a coding run's sandbox is
@@ -654,12 +663,20 @@ def clone_repo_for_sandbox(
     if dest.exists():
         raise ValueError(f"sandbox clone target already exists: {dest}")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["git", "clone", "--no-hardlinks", str(source), str(dest)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    if worktree:
+        subprocess.run(
+            ["git", "-C", str(source), "worktree", "add", "--detach", str(dest)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    else:
+        subprocess.run(
+            ["git", "clone", "--no-hardlinks", str(source), str(dest)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
     return create_sandbox(
         dest,
         task_id=task_id or name,
@@ -669,6 +686,47 @@ def clone_repo_for_sandbox(
         image=image,
         allow_fallback=allow_fallback,
     )
+
+
+def remove_run_worktree(source_repo: str | Path, worktree_path: str | Path) -> bool:
+    """Remove a run worktree created by ``clone_repo_for_sandbox(worktree=True)``.
+
+    ``git worktree remove --force`` from the source repo, then ``prune`` so
+    a half-removed entry never lingers in the source's worktree list. True
+    when the path is gone afterwards. Never raises: a cleanup failure is
+    reported by the caller and must not replace the run's verdict (the same
+    rule as ``Sandbox.close()``). Only ever called on a path THIS module
+    created under the sandbox parent — never on an operator's checkout.
+    """
+    import shutil
+    import subprocess
+
+    source = Path(source_repo).resolve()
+    path = Path(worktree_path).resolve()
+    try:
+        subprocess.run(
+            ["git", "-C", str(source), "worktree", "remove", "--force", str(path)],
+            capture_output=True, text=True, timeout=60,
+        )
+        subprocess.run(
+            ["git", "-C", str(source), "worktree", "prune"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:
+        log.warning("worktree removal failed for %s", path, exc_info=True)
+    if path.exists():
+        # The git command refused (a dirty lock, a moved source). The path
+        # is one this module created under the sandbox parent; removing the
+        # directory directly is the backstop, and prune clears the entry.
+        try:
+            shutil.rmtree(path)
+            subprocess.run(
+                ["git", "-C", str(source), "worktree", "prune"],
+                capture_output=True, text=True, timeout=30,
+            )
+        except Exception:
+            log.warning("worktree directory removal failed for %s", path, exc_info=True)
+    return not path.exists()
 
 
 # ---------------------------------------------------------------------------

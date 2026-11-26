@@ -1156,6 +1156,16 @@ coding:
   # handed a weaker sandbox than you asked for is the one failure mode you
   # would not notice. Pass allow_fallback=True only if you mean best-effort.
   sandbox_type: process
+  # Worktree per run (experimental, blackboard protocol §5): each coding run
+  # gets its own git WORKTREE of the source repo instead of a full clone,
+  # removed when the run completes (every exit path). Two runs on one repo
+  # no longer share a checkout; the per-run branch name gets a unique suffix
+  # because worktrees share the source's refs. The sandbox wrapper (process /
+  # bwrap / docker) is the same either way. Off: the full-clone behavior
+  # exactly as before. The worktree shares the source's OBJECT STORE — the
+  # isolation is the checkout, not the objects; choose docker/bwrap when the
+  # run must not reach the source's files at all.
+  worktree_per_run: false
   sandbox_dir: "~/.prometheus/coding/sandboxes/"
   max_task_duration_minutes: 120
   max_iterations: 50

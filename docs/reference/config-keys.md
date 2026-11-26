@@ -280,6 +280,7 @@ none either — the key is documented so its absence is visible.
 | `coding` | *(section)* |
 | `coding.enabled` | `False` |
 | `coding.sandbox_type` | `process` |
+| `coding.worktree_per_run` | `False` |
 | `coding.sandbox_dir` | `~/.prometheus/coding/sandboxes/` |
 | `coding.max_task_duration_minutes` | `120` |
 | `coding.max_iterations` | `50` |
