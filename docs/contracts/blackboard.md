@@ -1,7 +1,7 @@
-# Blackboard protocol, v0 (DRAFT)
+# Blackboard protocol, v0
 
 **Contract id:** `blackboard/0`
-**Status:** DRAFT — not frozen. Will's reviewer reviews this before any pillar code builds on it. Nothing in it is built yet; section 12 says which pieces are open (Prometheus) and which are pillar.
+**Status:** FROZEN as `blackboard/0` — 2026-11-26, after Will's reviewer's two rounds (findings 1–12, edits a–f, the green-AND-landed rule and the D22 route additions). A change to a frozen contract is a new version, not an edit. Section 12 says which pieces are open (Prometheus) and which are pillar; the build order there is in flight.
 **Part of:** Contracts v1, alongside the daemon API, the hook contract (`hooks.md`) and the memory schema.
 **Scope:** how a coordination pillar (Blackboard) and Prometheus agree on board state, roadmap items, task hand-off, merges, acceptance results and run-level events. The pillar decides; open code enforces. This document contains no pillar internals — the coordinator's prompt, policy and classifier are the pillar's own, closed.
 **References:** the Blackboard design doc (Will, 2026-09-09 / 2026-11-25; internal, not in this repo — the decisions this draft leans on are inlined where used: D3 Prometheus-without-Blackboard-unchanged, D4 open/closed line, D9 orphan board, D10 stateless coordinator, D11 coordinator-decides-merges + two acceptance gates, D13 ACP approval rule, **D18: a pillar's actions go through the daemon API under the gate, never through hook responses**, and **D22: the pillar's credential is a limited scope — Blackboard routes only, never approvals/pairing/config; granted once by Will, revocable, audit names the pillar**); `docs/contracts/hooks.md` (the event contract this extends); `docs/PAIRING-APPROVAL-API.md` and `docs/contracts/device-scoping.md` (the credential model a worker or client joins through). File paths are relative to the repo root; names, not line numbers.
@@ -84,7 +84,7 @@ Each item carries, in both `roadmap.md` (table) and `roadmap.json` (generated), 
 |---|---|
 | `id` | **Stable.** Assigned once, never reused, never renumbered. The branch name, task MD, results and events all key on it. Format: `<mission-id>.<n>` (e.g. `auth-rework.4`). |
 | `title` | One line, human-readable. |
-| `depends_on` | List of item ids. Edges are the merge order: an item is mergeable only when every dependency's post-merge acceptance is green. Cycles are a roadmap error, refused at parse. |
+| `depends_on` | List of item ids. Edges are the merge order: an item is mergeable only when every dependency's post-merge acceptance is **green AND landed** — the record is green AND its merge commit (`tree`) is an ancestor of the integration branch (`git merge-base --is-ancestor`). The record is written before the compare-and-swap advance, so a refused advance leaves a green record for a merge that never landed; the ancestry check is what keeps that from counting as done. Cycles are a roadmap error, refused at parse. |
 | `acceptance` | **Machine-checkable:** a command (argv or shell line, run on the integrated tree for the post-merge gate) plus an `expected_exit_code` (default 0). Prose-only criteria are not acceptance; they belong in the title or the mission text. The expected exit code is carried into every result record (§7) so "green" is derivable from the record alone. |
 | `status` | **Not a stored field.** Computed by open code from board state + run events: `pending` / `running` / `branch-green` / `merged` / `blocked` / `amended`. It appears in the computed overlay (a VIEW of open-computed facts — the §7 records — never a pillar decision; D4 reserves "is this done" for open code). Neither `roadmap.md` nor `roadmap.json` carries a status column: status drifts, the computation is the truth. The pillar and Beacon render the overlay; they do not decide it. |
 | `owner_hint` | Optional: the agent kind best suited (coder, critic, …). Advisory; the coordinator decides. |
@@ -159,7 +159,7 @@ The mission's **integration branch** is `bb/<mission>/integrate`, created by ope
 A daemon tool (`bb_merge`, name provisional) that:
 
 - **requires the intent block as an argument** — the worker's brief statement of what changed and why. The gate rejects the call without it; enforcement is in the tool, not in instructions.
-- checks the item's dependencies: every `depends_on` item's post-merge result is green, else refuse with the missing ids named.
+- checks the item's dependencies: every `depends_on` item's post-merge result is **green AND landed** — the record green AND its merge commit an ancestor of the integration branch (a green record from a refused CAS advance never counts), else refuse with the missing ids named.
 - merges `bb/<mission>/<item>/<agent>` into the mission's integration branch (`bb/<mission>/integrate`) **and nothing else** — any other `into`, or an empty mission, is refused. The merge is built in a TEMPORARY worktree of the integration tip; the operator's checkout is never touched. **A conflict is returned as a result** (the conflicted paths, the two sides' refs), never resolved with `-X ours/theirs` or any strategy flag. The coordinator escalates it.
 - on a clean merge, runs the **post-merge acceptance check on the merge commit** (accept-before-advance): the item's acceptance command, **read verbatim from `roadmap.json` on the board by item id** — the caller supplies no command, so nothing but the human-owned roadmap decides what runs — on a temporary detached checkout of the merge commit, **through the coding sandbox** (the same read/write shell floors and env allowlist a coding run's acceptance uses, with that checkout as the only workspace; never the daemon's environment). A refused floor means nothing ran.
 - **advances the integration branch ONLY on green**, by compare-and-swap `update-ref <ref> <merge> <old>`; on red the branch stays where it was and the result carries the red record. A concurrent mover of the ref refuses the advance, never clobbers.
@@ -226,9 +226,11 @@ Rules carried over from `hooks/1.0` unchanged:
 
 **The action path, and its credential tier — D22 (decided by Will, 2026-11-26).** Tools are not directly callable by API clients today; a pillar that wants to start a run or request a merge needs a ROUTE. The pillar gets a **LIMITED SCOPE, not an owner-device credential**: a dedicated credential that can call ONLY the Blackboard routes:
 
-- `POST /api/blackboard/run` (name provisional) — start a run for a roadmap item (the daemon's coding-run path under the gate; NOT the operator-only `POST /api/code`).
+- `POST /api/blackboard/run` (name provisional) — start a run for a roadmap item. **Takes a roadmap item id only, never free-form task text**: the open task-MD composer (§6) builds the prompt from the roadmap, so the pillar cannot direct arbitrary work. The daemon's coding-run path under the gate; NOT the operator-only `POST /api/code`.
 - `POST /api/blackboard/merge` (name provisional) — request a merge; validates the intent block and calls the same merge-tool code under the gate.
 - `GET /api/blackboard/board` (name provisional) — read the board (roadmap, results, overlay).
+- `POST /api/blackboard/interpretations` (name provisional) — append an interpretation (§4). Append-only; the daemon validates the entry format and stamps the pillar's identity — the pillar never writes the file directly.
+- `POST /api/blackboard/escalate` (name provisional) — an amendment escalation. It drops the run to Supervised and notifies Will; it **never edits the roadmap** (an amendment is the human's act through Beacon, §4).
 
 **It can never answer approvals, pair devices or change config** — those routes refuse the pillar scope outright, the same default-deny the device-scoping contract already enforces. The credential is **granted once by Will, revocable**, and every action's audit row **names the pillar** that took it. It is **never the daemon's API token** (hooks.md §11's rule, verbatim). The routes do not exist yet (§12); until they do, the pillar can observe events and advise, and every action route answers 403. Nothing is widened silently.
 
