@@ -186,3 +186,21 @@ def test_clean_run_reports_no_wip_branch(source_repo, tmp_path):
     _git(box.root, "commit", "-q", "-m", "finished")
     removed, wip = remove_run_worktree(source_repo, box.root, branch="coding/run9")
     assert removed is True and wip is None
+
+
+def test_wip_reports_the_branch_actually_committed_to(source_repo, tmp_path):
+    """Review #2 nit: the worktree sits on a branch OTHER than the caller's
+    `branch` argument — the WIP commit lands on the branch it is on, and
+    that is the branch reported, not the argument."""
+    box = clone_repo_for_sandbox(source_repo, tmp_path / "sandboxes", name="run10",
+                                 worktree=True)
+    _git(box.root, "checkout", "-q", "-b", "coding/actual-branch")
+    (box.root / "file.txt").write_text("work in progress\n")
+    removed, wip = remove_run_worktree(source_repo, box.root,
+                                       branch="coding/expected-branch")
+    assert removed is True
+    assert wip == "coding/actual-branch"
+    assert _git(source_repo, "show", "coding/actual-branch:file.txt") == "work in progress"
+    # the argument branch was never created
+    assert subprocess.run(["git", "-C", str(source_repo), "rev-parse", "--verify", "-q",
+                           "coding/expected-branch"], capture_output=True).returncode != 0

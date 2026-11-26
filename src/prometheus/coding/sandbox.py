@@ -736,7 +736,12 @@ def remove_run_worktree(
                     capture_output=True, text=True, timeout=30,
                 )
                 on_branch = head.stdout.strip() if head.returncode == 0 else ""
-                wip_branch = branch or on_branch or f"coding/wip-{path.name}"
+                # Report the branch ACTUALLY committed to (review #2 nit):
+                # when the worktree sits on a branch, the WIP commit lands
+                # there — even if it differs from the caller's `branch`
+                # argument. `branch` is only the fallback name for a
+                # detached worktree's new WIP branch.
+                wip_branch = on_branch or branch or f"coding/wip-{path.name}"
                 if not on_branch:
                     subprocess.run(
                         ["git", "-C", str(path), "checkout", "-q", "-b", wip_branch],
