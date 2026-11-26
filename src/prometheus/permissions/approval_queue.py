@@ -746,91 +746,94 @@ class ApprovalQueue:
             notify_chat=chat_id or self._default_chat_id,
         )
         self._register(action)
-        await self._emit("approval_pending", self.serialize_pending(action))
-
-        # Send notification via Telegram
-        target_chat = chat_id or self._default_chat_id
-        if self._telegram and target_chat:
-            # The bare forms lead: when this is the only pending request the
-            # id is optional, and copying an 8-hex id back is precisely the
-            # friction that made operators type `/approve` alone and get
-            # usage text instead of an approval.
-            # Each scope verb is offered WITH the extent it would grant.
-            # "session" is gone: there is one gate per process and _grants is
-            # never cleared, so it never meant a session — "until restart" is
-            # the true boundary and states it at consent time.
-            # PRESENTATION ONLY — ``prospective_extents`` is unchanged and is
-            # still the single source of the extents. What moved is WHERE they
-            # are rendered.
-            #
-            # The prompt carried all four verb+extent lines on EVERY request:
-            # eleven non-blank lines, four of them repeating the same two
-            # paths twice each. Grants are rare and approve-once is common, so
-            # the common case was paying the rare case's cost every time.
-            #
-            # The four lines now live behind ``/remember``, which reproduces
-            # them verbatim. ⚠ THE VERB AND ITS EXTENT STAY ON ONE LINE, there
-            # and here — that is the property this sprint exists to hold
-            # (consent obtained under a false description), and a menu that
-            # named the verbs while deferring their extents to a second round
-            # trip would reintroduce exactly the defect. The round trip costs
-            # a message only when a lasting grant is actually wanted.
-            extents = prospective_extents(action)
-            lines = [
-                "Permission requested:",
-                f"Tool: {tool_name}",
-                f"Action: {description}",
-            ]
-            # THE ARGUMENTS BEING APPROVED. Above the verbs, not below them:
-            # for `type_text` the arguments ARE the decision, and a prompt
-            # that puts the answer options before the thing being decided
-            # invites the reflex answer. Already redacted and truncated at
-            # construction — `action.arguments` is never raw.
-            arg_lines = format_arguments(action.arguments)
-            if arg_lines:
-                lines.append("With:")
-                lines.extend(arg_lines)
-            lines += [
-                "",
-                "/approve — approve this ONCE (or /deny)",
-            ]
-            if extents:
-                lines.append(
-                    "/remember — options that create a lasting grant"
-                )
-            # ``/approve all`` is offered ONLY when it differs from
-            # ``/approve``, and never without its extent. See the module note
-            # on why it is not hidden behind /remember: it creates no grant.
-            n_pending = len(self.pending)
-            if n_pending > 1:
-                lines.append(
-                    f"/approve all — approve the {n_pending} pending requests, "
-                    f"once each; creates no lasting grant"
-                )
-            lines += [
-                "",
-                f"Expires in {_humanise_window(self._timeout)} if unanswered.",
-                f"id: {request_id} (only needed if several are pending)",
-            ]
-            msg = "\n".join(lines)
-            try:
-                await self._telegram.send(target_chat, msg, parse_mode=None)
-            except Exception as exc:
-                logger.warning("Failed to send approval request: %s", exc)
-
-        # Wait for response or timeout. The pop is in a FINALLY (D14): a
-        # caller cancelled while it waited — a stopped desktop task, a
-        # shut-down turn — used to leave its request pending forever, still
-        # answerable, with nothing waiting on the answer.
+        # From here the request is listed, so EVERY way out of this call must end it: the signal and the chat notice
+        # below are awaits too, and a cancelled asker (a worker whose call dropped or whose process ended) used to
+        # leave the entry pending in the window before the wait began: listed, unanswerable, nothing to pop it.
         try:
+            await self._emit("approval_pending", self.serialize_pending(action))
+
+            # Send notification via Telegram
+            target_chat = chat_id or self._default_chat_id
+            if self._telegram and target_chat:
+                # The bare forms lead: when this is the only pending request the
+                # id is optional, and copying an 8-hex id back is precisely the
+                # friction that made operators type `/approve` alone and get
+                # usage text instead of an approval.
+                # Each scope verb is offered WITH the extent it would grant.
+                # "session" is gone: there is one gate per process and _grants is
+                # never cleared, so it never meant a session — "until restart" is
+                # the true boundary and states it at consent time.
+                # PRESENTATION ONLY — ``prospective_extents`` is unchanged and is
+                # still the single source of the extents. What moved is WHERE they
+                # are rendered.
+                #
+                # The prompt carried all four verb+extent lines on EVERY request:
+                # eleven non-blank lines, four of them repeating the same two
+                # paths twice each. Grants are rare and approve-once is common, so
+                # the common case was paying the rare case's cost every time.
+                #
+                # The four lines now live behind ``/remember``, which reproduces
+                # them verbatim. ⚠ THE VERB AND ITS EXTENT STAY ON ONE LINE, there
+                # and here — that is the property this sprint exists to hold
+                # (consent obtained under a false description), and a menu that
+                # named the verbs while deferring their extents to a second round
+                # trip would reintroduce exactly the defect. The round trip costs
+                # a message only when a lasting grant is actually wanted.
+                extents = prospective_extents(action)
+                lines = [
+                    "Permission requested:",
+                    f"Tool: {tool_name}",
+                    f"Action: {description}",
+                ]
+                # THE ARGUMENTS BEING APPROVED. Above the verbs, not below them:
+                # for `type_text` the arguments ARE the decision, and a prompt
+                # that puts the answer options before the thing being decided
+                # invites the reflex answer. Already redacted and truncated at
+                # construction — `action.arguments` is never raw.
+                arg_lines = format_arguments(action.arguments)
+                if arg_lines:
+                    lines.append("With:")
+                    lines.extend(arg_lines)
+                lines += [
+                    "",
+                    "/approve — approve this ONCE (or /deny)",
+                ]
+                if extents:
+                    lines.append(
+                        "/remember — options that create a lasting grant"
+                    )
+                # ``/approve all`` is offered ONLY when it differs from
+                # ``/approve``, and never without its extent. See the module note
+                # on why it is not hidden behind /remember: it creates no grant.
+                n_pending = len(self.pending)
+                if n_pending > 1:
+                    lines.append(
+                        f"/approve all — approve the {n_pending} pending requests, "
+                        f"once each; creates no lasting grant"
+                    )
+                lines += [
+                    "",
+                    f"Expires in {_humanise_window(self._timeout)} if unanswered.",
+                    f"id: {request_id} (only needed if several are pending)",
+                ]
+                msg = "\n".join(lines)
+                try:
+                    await self._telegram.send(target_chat, msg, parse_mode=None)
+                except Exception as exc:
+                    logger.warning("Failed to send approval request: %s", exc)
+
+            # Wait for response or timeout. The pop is in a FINALLY (D14): a
+            # caller cancelled while it waited — a stopped desktop task, a
+            # shut-down turn — used to leave its request pending forever, still
+            # answerable, with nothing waiting on the answer.
             async with self._worker_clock_for(action):
                 await self._wait_for_answer(action, request_id, target_chat)
-        except asyncio.CancelledError:
-            # The asker was cancelled while it waited: the turn that raised this request ended (a stopped turn, a
-            # parent whose subagent was waiting, a shut-down loop). Nothing is left to act on an answer, so say
-            # so the way a worker's end does (``withdraw``): every client drops the card, the chat that was asked
-            # is told, and a resolution row is written. Until #791 this popped the request silently, so a card
-            # and a Telegram prompt stayed up for a request that was already gone.
+        except BaseException:
+            # The asker was cancelled (a CancelledError is not an Exception), or failed, before or while it waited:
+            # the turn that raised this request ended (a stopped turn, a parent whose subagent was waiting, a
+            # shut-down loop, a worker whose call dropped). Nothing is left to act on an answer, so say so the way a
+            # worker's end does (``withdraw``): every client drops the card, the chat that was asked is told, and a
+            # resolution row is written. A request that already has an answer keeps it (``withdraw`` leaves it).
             await self._withdraw_asker_gone(request_id)
             raise
         finally:
@@ -1033,8 +1036,12 @@ class ApprovalQueue:
         return True
 
     def list_pending(self) -> list[PendingAction]:
-        """Return all pending approval requests."""
-        return list(self.pending.values())
+        """Return all pending approval requests: those with no answer yet.
+
+        A request that has an answer is not pending, whether or not its waiter has popped it from ``pending`` yet
+        (``_finished`` holds it from the moment it is answered, expired or withdrawn), so a client is never shown a
+        card that cannot be answered."""
+        return [a for rid, a in self.pending.items() if rid not in self._finished]
 
     # -- withdrawal: the asker is gone ------------------------------------------------------------------------------
 
@@ -1052,6 +1059,10 @@ class ApprovalQueue:
 
         action = self.pending.pop(request_id, None)
         if action is None:
+            return False
+        if request_id in self._finished:
+            # Already answered (or expired) and only waiting for its waiter to pop it: that answer stands. A
+            # withdrawal must not turn an approval into a denial after the fact, or tell clients a second story.
             return False
         action._result = ApprovalResult.DENIED
         action._event.set()
@@ -1154,7 +1165,13 @@ class ApprovalQueues:
         return None
 
     def list_pending(self) -> list[PendingAction]:
-        return list(self.pending.values())
+        """Each queue's own pending requests (its ``list_pending`` leaves out any that already has an answer)."""
+        merged: dict[str, PendingAction] = {}
+        for q in self._queues:
+            lister = getattr(q, "list_pending", None)
+            if lister is not None:
+                merged.update({a.request_id: a for a in lister()})
+        return list(merged.values())
 
     @property
     def _security_gate(self) -> Any:
