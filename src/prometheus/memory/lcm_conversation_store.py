@@ -173,6 +173,14 @@ class LCMConversationStore:
         the unit commits or rolls back, then writes and commits on its own.
         That exclusion is the design; "a bare call commits into the open
         transaction" was the bug.
+
+        READS DO NOT TAKE THE LOCK: another thread's read can see the unit's
+        UNCOMMITTED rows while it is open (one connection — its reads share
+        the transaction), and those rows vanish if the unit rolls back. A
+        reader that must not see half a unit reads after the unit ends, or
+        tolerates the disappearance. If more multi-step units appear, move
+        units to a dedicated connection so the file lock, not the shared
+        transaction state, does the excluding.
         """
         with self._tx_lock:
             outermost = getattr(self._tx_local, "depth", 0) == 0
@@ -1589,8 +1597,16 @@ class LCMConversationStore:
         INSERT OR REPLACE, not INSERT OR IGNORE: a rowid is durable and unique, so a second write
         for the same rowid is a correction of the first, and keeping the stale id would strand
         the row that actually correlates to it.
+
+        A NAMESPACED claim (``acp-key:…``) is stored BYTE-EXACT: the schema's
+        idempotency key is opaque and case-sensitive, and whitespace is part
+        of it. Stripping it broke idempotency both ways — a key ending in a
+        space never deduped (the stored claim lost the space the lookup
+        compares), and two DIFFERENT keys that strip to the same string
+        collided into one. Wire-typed ids keep their historical trim.
         """
-        cid = (client_msg_id or "").strip()
+        raw = client_msg_id or ""
+        cid = raw if raw.startswith("acp-key:") else raw.strip()
         if not cid or len(cid) > CLIENT_MSG_ID_MAX or row_id is None:
             return
         self._conn.execute(
@@ -1604,9 +1620,11 @@ class LCMConversationStore:
         """Whether a message the client named ``client_msg_id`` is already stored in ``session_id``.
 
         What lets ``POST /api/chat/send`` treat a retry as the same message after a restart, when its in-memory
-        record of ids it has accepted is gone. A blank id is never "seen".
+        record of ids it has accepted is gone. A blank id is never "seen". A namespaced claim
+        (``acp-key:…``) is matched BYTE-EXACT, like its write: whitespace is part of the opaque key.
         """
-        cid = (client_msg_id or "").strip()
+        raw = client_msg_id or ""
+        cid = raw if raw.startswith("acp-key:") else raw.strip()
         if not cid:
             return False
         row = self._conn.execute(

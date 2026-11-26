@@ -538,3 +538,47 @@ def test_bare_writer_during_COMMITTED_unit_lands_after_it(store):
     assert not ta.is_alive() and not tb.is_alive()
     assert len(store.get_all_messages("acp:unit")) == 1
     assert len(store.get_all_messages("telegram:other")) == 1
+
+
+# ── whitespace is part of the opaque key (review finding, d2a7f34) ──────────
+
+
+def test_a_key_ending_in_whitespace_still_dedups(store):
+    """The claim is stored byte-exact: 'k ' retried as 'k ' returns the first
+    messageId. Stripping the stored claim lost the space the lookup compares,
+    so the retry inserted a second row (reproduced)."""
+    m = SessionMap(store)
+    sid = m.new_session({"cwd": "/tmp"}).session_id
+    params = {"sessionId": sid, "prompt": [{"type": "text", "text": "hi"}], "idempotencyKey": "k "}
+    first = m.insert_prompt(params)
+    again = m.insert_prompt(params)
+    assert again.message_id == first.message_id
+    assert len(store.get_all_messages(sid)) == 1
+    assert "acp-key:k " in store.get_message_client_ids(sid).values()
+
+
+def test_keys_that_differ_only_in_whitespace_are_different_submissions(store):
+    """'x ' then 'x' are TWO submissions: stripping made them collide, and the
+    second prompt was silently dropped with the first's messageId (reproduced)."""
+    m = SessionMap(store)
+    sid = m.new_session({"cwd": "/tmp"}).session_id
+    first = m.insert_prompt({"sessionId": sid, "prompt": [{"type": "text", "text": "one"}],
+                             "idempotencyKey": "x "})
+    second = m.insert_prompt({"sessionId": sid, "prompt": [{"type": "text", "text": "two"}],
+                              "idempotencyKey": "x"})
+    assert second.message_id != first.message_id
+    rows = store.get_all_messages(sid)
+    assert len(rows) == 2
+    claims = set(store.get_message_client_ids(sid).values())
+    assert claims == {"acp-key:x ", "acp-key:x"}
+
+
+def test_leading_whitespace_and_case_are_part_of_the_key(store):
+    m = SessionMap(store)
+    sid = m.new_session({"cwd": "/tmp"}).session_id
+    ids = set()
+    for key in (" k", "k", "K", "k "):
+        ids.add(m.insert_prompt({"sessionId": sid, "prompt": [{"type": "text", "text": key}],
+                                 "idempotencyKey": key}).message_id)
+    assert len(ids) == 4
+    assert len(store.get_all_messages(sid)) == 4
