@@ -188,13 +188,18 @@ async def discover(config: Mapping[str, Any]) -> Discovery:
         ]
     if isinstance(voices, dict) and isinstance(voices.get("voices"), list):
         out.voices = [v for v in voices["voices"] if isinstance(v, str)]
-    tts = box.get("tts") if isinstance(box.get("tts"), dict) else {}
-    if isinstance(tts.get("engines"), list):
-        out.engines = [e for e in tts["engines"] if isinstance(e, dict) and isinstance(e.get("id"), str)]
-    vad = box.get("vad") if isinstance(box.get("vad"), dict) else {}
-    out.vad_health = vad.get("health") if vad.get("health") in ("ok", "down") else "unknown"
-    if isinstance(box.get("ranges"), dict):
-        out.ranges = box["ranges"]
+    tts_raw = box.get("tts")
+    tts: dict[str, Any] = tts_raw if isinstance(tts_raw, dict) else {}
+    engines = tts.get("engines")
+    if isinstance(engines, list):
+        out.engines = [e for e in engines if isinstance(e, dict) and isinstance(e.get("id"), str)]
+    vad_raw = box.get("vad")
+    vad: dict[str, Any] = vad_raw if isinstance(vad_raw, dict) else {}
+    vad_state = vad.get("health")
+    out.vad_health = vad_state if isinstance(vad_state, str) and vad_state in ("ok", "down") else "unknown"
+    ranges = box.get("ranges")
+    if isinstance(ranges, dict):
+        out.ranges = ranges
     return out
 
 
@@ -202,7 +207,8 @@ async def discover(config: Mapping[str, Any]) -> Discovery:
 
 def _half_view(config: Mapping[str, Any], kind: str, health: Mapping[str, Any]) -> dict[str, Any]:
     settings = _settings_for(config, kind)
-    block = config.get(kind) if isinstance(config.get(kind), Mapping) else {}
+    block_raw = config.get(kind)
+    block: Mapping[str, Any] = block_raw if isinstance(block_raw, Mapping) else {}
     if settings is None:
         return {"configured": False, "health": {"state": "unknown"}}
     out: dict[str, Any] = {"configured": True, "health": dict(health)}
@@ -248,8 +254,10 @@ def view(config: Mapping[str, Any], health: Mapping[str, Any], disc: Discovery, 
     """The state both GET and PUT answer with. ``health`` is ``Voice.status()``'s per-half record."""
     notices = list(warnings or [])
     box = any_box(config)
-    vad_block = config.get("vad") if isinstance(config.get("vad"), Mapping) else {}
-    stt_block = config.get("stt") if isinstance(config.get("stt"), Mapping) else {}
+    vad_raw = config.get("vad")
+    vad_block: Mapping[str, Any] = vad_raw if isinstance(vad_raw, Mapping) else {}
+    stt_raw = config.get("stt")
+    stt_block: Mapping[str, Any] = stt_raw if isinstance(stt_raw, Mapping) else {}
     if box is None:
         notices.append({"code": "not_configured", "message": "No voice box is set up."})
     elif not disc.live:
