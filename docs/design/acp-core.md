@@ -81,12 +81,15 @@ restart needs no mapping table.
 - Idempotency: `(sessionId, idempotencyKey)` claims live in the store's
   `message_client_ids` side table under `acp-key:<key>` — the same durable
   mechanism the REST send path uses. Lookup, insert and claim record run in
-  ONE store transaction (`LCMConversationStore.transaction()`: a re-entrant
-  lock plus BEGIN IMMEDIATE, with the store's own commits suppressed until
-  the unit ends), so two concurrent prompts with the same key cannot both
-  pass the lookup, and a crash mid-unit rolls the insert back with it. A
-  retry after a restart returns the first insertion's message id and inserts
-  nothing.
+  ONE store transaction (`LCMConversationStore.transaction()`: BEGIN
+  IMMEDIATE plus per-thread commit suppression). The connection is shared
+  across threads and SQLite has ONE transaction per connection, so every
+  write METHOD also takes the store's re-entrant write lock for its whole
+  run: a bare writer on another thread waits for the unit to end instead of
+  committing into it (which would end the unit early and make its rollback
+  useless). Two concurrent prompts with the same key cannot both pass the
+  lookup, and a crash mid-unit rolls the insert back with it. A retry after
+  a restart returns the first insertion's message id and inserts nothing.
 - `session/resume` replays history keyed by DURABLE rowid (never positional
   ids), ordered by prompt position, ending with the `replay_complete`
   SessionUpdate. The caller holds live updates for the session until the marker

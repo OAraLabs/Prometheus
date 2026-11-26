@@ -7,6 +7,7 @@ messages as compacted, uncompacted counts).
 
 from __future__ import annotations
 
+import functools
 import logging
 import sqlite3
 import threading
@@ -96,6 +97,24 @@ def _is_turn_key_conflict(exc: sqlite3.IntegrityError) -> bool:
 CLIENT_MSG_ID_MAX = 128
 
 
+def _serialized_write(fn):
+    """Hold the store's write lock for the WHOLE method.
+
+    One connection means one transaction state: a bare write on another
+    thread must not execute (or commit) inside a transaction() unit it does
+    not own — its commit would end the unit early and make the unit's
+    rollback useless, and the unit's rollback would discard its uncommitted
+    row. Taking the lock for the whole method (not just the commit point)
+    excludes both. Re-entrant: a transaction() unit calling these methods
+    already holds the lock and is not blocked by itself.
+    """
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with self._tx_lock:
+            return fn(self, *args, **kwargs)
+    return wrapper
+
+
 class LCMConversationStore:
     """SQLite store for conversation messages with FTS5 search.
 
@@ -110,12 +129,17 @@ class LCMConversationStore:
         self._db_path = db_path if db_path is not None else get_lcm_db_path()
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        # Re-entrant: the connection is shared across threads (check_same_thread
-        # is off), and a multi-statement unit of work — check, insert, record —
-        # must hold ONE write transaction against every other writer, including
-        # another thread holding this same store object. Ordinary single-method
-        # callers are unaffected: sqlite3 already serializes them on the
-        # connection, and the lock is only taken by `transaction()` below.
+        # ONE connection, ONE transaction state, MANY threads (check_same_thread
+        # is off). SQLite has a single transaction per connection, so a bare
+        # write on thread B COMMITS thread A's open unit — and A's later
+        # rollback then cannot undo it (reproduced 2026-11-25). The lock is
+        # therefore taken by EVERY write method for its whole run (the
+        # @_serialized_write decorator) and by transaction(): a bare writer
+        # waits for an open unit to finish before its write can even execute,
+        # and a unit's BEGIN/COMMIT/ROLLBACK never interleaves with another
+        # thread's statements. Re-entrant so a unit can call the store's own
+        # methods without deadlocking itself. The chat-projects store shares
+        # this lock (its SAVEPOINT writes run on the same connection).
         self._tx_lock = threading.RLock()
         self._tx_local = threading.local()
         self._apply_schema()
@@ -128,23 +152,27 @@ class LCMConversationStore:
         insert, a side-table record) and must not interleave with another
         writer NOR survive a crash half-done:
 
-        - the re-entrant lock excludes other threads holding THIS store
-          object (the connection is shared, check_same_thread off), so two
-          threads cannot both pass a "not seen" lookup before either inserts;
+        - the re-entrant lock is held for the WHOLE unit, and every write
+          METHOD takes it for its whole run too (@_serialized_write) — so a
+          plain store call on another thread waits until the unit ends
+          before its write can even execute (one connection means one
+          transaction state; a bare commit would end the unit early and
+          make its rollback useless, and the unit's rollback would discard
+          the bare writer's uncommitted row);
         - BEGIN IMMEDIATE takes the database write lock up front, so another
           CONNECTION to the file waits rather than slipping between steps;
-        - while the block runs, the store's own ``commit()`` calls are
-          SUPPRESSED (they would otherwise end the explicit transaction —
-          sqlite3's commit is unconditional). The block's writes land
-          together at the final COMMIT, or not at all: any exception rolls
-          the whole unit back.
+        - while the block runs on THIS thread, the store's own ``commit()``
+          calls are suppressed (sqlite3's commit is unconditional and would
+          end the explicit transaction). The block's writes land together at
+          the final COMMIT, or not at all: any exception rolls the whole
+          unit back.
 
-        Suppression is per-thread and re-entrant: a nested transaction()
-        joins the outer unit; single-method callers on any thread commit
-        exactly as before. A different thread calling a store method while
-        a block holds the lock waits on the lock only if it also uses
-        transaction(); a bare method call commits into the open transaction
-        and is part of the unit — which is the point: one writer at a time.
+        Suppression is per-thread and re-entrant: a nested transaction() on
+        the same thread joins the outer unit. A bare method call on ANOTHER
+        thread does NOT join the unit — it blocks on the write lock until
+        the unit commits or rolls back, then writes and commits on its own.
+        That exclusion is the design; "a bare call commits into the open
+        transaction" was the bug.
         """
         with self._tx_lock:
             outermost = getattr(self._tx_local, "depth", 0) == 0
@@ -166,10 +194,13 @@ class LCMConversationStore:
     def _commit(self) -> None:
         """The store's commit point. A no-op while a transaction() block is
         open on this thread — the block's final COMMIT lands every write
-        together. Everywhere else this is exactly ``self._conn.commit()``."""
+        together. Everywhere else this is exactly ``self._conn.commit()``,
+        under the lock: a bare writer on another thread must not commit
+        (and thereby end) a unit this thread does not own."""
         if getattr(self._tx_local, "depth", 0) > 0:
             return
-        self._conn.commit()
+        with self._tx_lock:
+            self._conn.commit()
 
     # ------------------------------------------------------------------
     # Schema
@@ -438,6 +469,7 @@ class LCMConversationStore:
         msg.session_id = session_id
         return self.insert_message(msg, append=append)
 
+    @_serialized_write
     def insert_message(self, msg: MessagePart, *, append: bool = False) -> str:
         """Insert a message and update the FTS5 index. Returns the message id.
 
@@ -651,6 +683,7 @@ class LCMConversationStore:
         ).fetchall()
         return [self._row_to_message(r) for r in reversed(rows)]
 
+    @_serialized_write
     def mark_compacted(self, message_ids: list[str]) -> int:
         """Mark messages as compacted. Returns the number of rows affected."""
         if not message_ids:
@@ -1125,6 +1158,7 @@ class LCMConversationStore:
             "hidden_machine": machine_hidden,
         }
 
+    @_serialized_write
     def purge_session(self, session_id: str) -> dict[str, int]:
         """IRREVERSIBLY remove a session's content. The opposite of a tombstone.
 
@@ -1260,12 +1294,16 @@ class LCMConversationStore:
 
     def chat_projects(self) -> ChatProjectStore:
         """The chat projects store, on this connection (``projects/store.py``): filing a session changes its
-        membership and its workspace binding in one transaction. Made once, then kept."""
+        membership and its workspace binding in one transaction. Made once, then kept.
+
+        It shares the store's write lock: its SAVEPOINT writes run on the SAME
+        connection, so they must not execute inside a transaction() unit they
+        do not own (one connection, one transaction state)."""
         store = getattr(self, "_chat_projects", None)
         if store is None:
             from prometheus.projects.store import ChatProjectStore
 
-            store = self._chat_projects = ChatProjectStore(self._conn)
+            store = self._chat_projects = ChatProjectStore(self._conn, write_lock=self._tx_lock)
         return store
 
     def _table_exists(self, name: str) -> bool:
@@ -1275,6 +1313,7 @@ class LCMConversationStore:
             ).fetchone()
         )
 
+    @_serialized_write
     def tombstone_session(self, session_id: str) -> None:
         """Durably forget a session: hide it from :meth:`list_sessions`.
 
@@ -1293,6 +1332,7 @@ class LCMConversationStore:
     # Session titles (GRAFT-MOBILE-BRIDGE 7)
     # ------------------------------------------------------------------
 
+    @_serialized_write
     def set_session_title(self, session_id: str, title: str) -> None:
         """Set (or replace) a session's display title. Last write wins.
 
@@ -1313,6 +1353,7 @@ class LCMConversationStore:
             )
         self._commit()
 
+    @_serialized_write
     def set_session_pinned(self, session_id: str, pinned: bool) -> None:
         """Pin or unpin a session. Unpinning DELETES the row.
 
@@ -1339,6 +1380,7 @@ class LCMConversationStore:
         ).fetchone()
         return row is not None
 
+    @_serialized_write
     def fork_session(self, origin_session: str, at_rowid: int, new_session_id: str) -> dict:
         """Copy `origin_session`'s history up to and including `at_rowid` into a new session.
 
@@ -1421,6 +1463,7 @@ class LCMConversationStore:
         return [{"session_id": r["session_id"], "origin_rowid": r["origin_rowid"],
                  "created_at": r["created_at"]} for r in rows]
 
+    @_serialized_write
     def set_session_profile(self, session_id: str, profile: str) -> None:
         """Bind a session to an agent profile. Blank CLEARS the binding.
 
@@ -1447,6 +1490,7 @@ class LCMConversationStore:
             )
         self._commit()
 
+    @_serialized_write
     def set_session_workspace(self, session_id: str, path: str, *, set_by: str = "rest") -> None:
         """Bind a session to a working directory. Blank CLEARS the binding.
 
@@ -1474,6 +1518,7 @@ class LCMConversationStore:
             )
         self._commit()
 
+    @_serialized_write
     def set_session_backend(self, session_id: str, key: str | None, *, set_by: str = "router") -> None:
         """Remember which local backend a session is pointed at (`/4090`,
         `mini:qwen2.5:7b-instruct`). None/blank CLEARS. Same shape and rules as
@@ -1530,6 +1575,7 @@ class LCMConversationStore:
     # Optimistic-row correlation (audit P9.6 / Beacon#144)
     # ------------------------------------------------------------------
 
+    @_serialized_write
     def set_message_client_id(
         self, session_id: str, row_id: int | None, client_msg_id: str | None
     ) -> None:

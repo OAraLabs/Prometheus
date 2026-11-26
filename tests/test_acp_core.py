@@ -9,6 +9,8 @@ Nothing here hand-writes an ACP payload.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -30,6 +32,7 @@ from prometheus.acp.framing import (
 from prometheus.acp.negotiation import PROTOCOL_VERSION, SCHEMA_TAG, negotiate
 from prometheus.acp.sessions import SessionMap, message_update, replay_complete_update
 from prometheus.memory.lcm_conversation_store import LCMConversationStore
+from prometheus.memory.lcm_types import MessagePart
 
 from .acp_fixtures import pinned_schema, schema_def, tck_exchanges
 
@@ -117,7 +120,7 @@ def test_captured_tck_notifications_validate_as_session_updates():
     for entry in tck_exchanges():
         msg = json.loads(entry["response_raw"])
         if msg.get("method") == "session/update":
-            n = types.UpdateSessionNotification.model_validate(msg["params"])
+            types.UpdateSessionNotification.model_validate(msg["params"])
             seen_kinds.add(msg["params"]["update"]["sessionUpdate"])
     # The capture must actually exercise the lifecycle, not just parse.
     assert {"user_message", "agent_message", "state_update", "replay_complete"} <= seen_kinds
@@ -420,3 +423,118 @@ def test_purge_vacuum_preserves_other_sessions_rowids(store):
     after = {p.row_id: p.content for p in store.messages_after_id(0, session_id=keep)}
     assert after == before, "VACUUM renumbered surviving rows — ACP messageIds would dangle"
     assert [str(r) for r in after] == ids[keep]
+
+
+# ── the unit vs a BARE writer on another thread (review finding, 8e4a69f) ────
+#
+# One connection means ONE transaction state. A plain store write on another
+# thread used to commit into the open unit (ending it early, so the unit's
+# rollback could not undo its own row) and could itself be discarded by the
+# unit's rollback. The fix: every write path takes the store's write lock for
+# its whole run, so a bare writer waits for the unit to end. Deterministic
+# acceptance tests with threading.Event, both directions.
+
+
+def _run_unit_vs_bare(store, *, bare_after_rollback: bool):
+    a_inserted = threading.Event()
+    b_done = threading.Event()
+    a_done = threading.Event()
+    failures: list = []
+
+    def thread_a():
+        try:
+            with store.transaction():
+                store.insert_message(
+                    MessagePart(
+                        session_id="acp:unit", role="user", content="A's row"),
+                    append=True)
+                a_inserted.set()
+                if not bare_after_rollback:
+                    # B cannot finish while the unit holds the lock; A must not
+                    # wait for it (that would deadlock the very exclusion under
+                    # test). Hold briefly so B is provably blocked, then crash.
+                    time.sleep(0.2)
+                    assert not b_done.is_set(), "bare writer ran INSIDE the unit"
+                raise RuntimeError("crash before recording the key")
+        except RuntimeError:
+            pass
+        except BaseException as exc:  # noqa: BLE001
+            failures.append(exc)
+        finally:
+            a_done.set()
+
+    def thread_b():
+        try:
+            assert a_inserted.wait(10)
+            if bare_after_rollback:
+                assert a_done.wait(10)
+            store.insert_message(
+                MessagePart(
+                    session_id="telegram:other", role="user", content="B's row"),
+                append=True)
+            b_done.set()
+        except BaseException as exc:  # noqa: BLE001
+            failures.append(exc)
+
+    ta = threading.Thread(target=thread_a)
+    tb = threading.Thread(target=thread_b)
+    ta.start()
+    tb.start()
+    ta.join(20)
+    tb.join(20)
+    assert not failures, failures
+    assert not ta.is_alive() and not tb.is_alive(), "a thread hung"
+    a_rows = store.get_all_messages("acp:unit")
+    b_rows = store.get_all_messages("telegram:other")
+    return a_rows, b_rows
+
+
+def test_bare_writer_during_unit_waits_and_survives_the_rollback(store):
+    """B's plain insert is attempted WHILE A's unit is open: it must not run
+    inside the unit (its commit would end the unit early). After A rolls back,
+    A's row is absent and B's row is present."""
+    a_rows, b_rows = _run_unit_vs_bare(store, bare_after_rollback=False)
+    assert a_rows == [], "A's row survived the rollback — the bare writer ended the unit early"
+    assert len(b_rows) == 1, "B's row was lost"
+
+
+def test_bare_writer_after_rollback_is_independent(store):
+    """The other order: B's INSERT executes after A's rollback. A's row is
+    absent, B's row is present — neither direction leaks."""
+    a_rows, b_rows = _run_unit_vs_bare(store, bare_after_rollback=True)
+    assert a_rows == []
+    assert len(b_rows) == 1
+
+
+def test_bare_writer_during_COMMITTED_unit_lands_after_it(store):
+    """The same exclusion on the success path: B waits, then both rows exist."""
+    a_inserted = threading.Event()
+    b_done = threading.Event()
+
+    def thread_a():
+        with store.transaction():
+            store.insert_message(
+                MessagePart(
+                    session_id="acp:unit", role="user", content="A's row"),
+                append=True)
+            a_inserted.set()
+            time.sleep(0.2)
+            assert not b_done.is_set(), "bare writer ran INSIDE the unit"
+
+    def thread_b():
+        assert a_inserted.wait(10)
+        store.insert_message(
+            MessagePart(
+                session_id="telegram:other", role="user", content="B's row"),
+            append=True)
+        b_done.set()
+
+    ta = threading.Thread(target=thread_a)
+    tb = threading.Thread(target=thread_b)
+    ta.start()
+    tb.start()
+    ta.join(20)
+    tb.join(20)
+    assert not ta.is_alive() and not tb.is_alive()
+    assert len(store.get_all_messages("acp:unit")) == 1
+    assert len(store.get_all_messages("telegram:other")) == 1
