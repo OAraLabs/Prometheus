@@ -4,7 +4,7 @@
 **Status:** DRAFT — not frozen. Will's reviewer reviews this before any pillar code builds on it. Nothing in it is built yet; section 12 says which pieces are open (Prometheus) and which are pillar.
 **Part of:** Contracts v1, alongside the daemon API, the hook contract (`hooks.md`) and the memory schema.
 **Scope:** how a coordination pillar (Blackboard) and Prometheus agree on board state, roadmap items, task hand-off, merges, acceptance results and run-level events. The pillar decides; open code enforces. This document contains no pillar internals — the coordinator's prompt, policy and classifier are the pillar's own, closed.
-**References:** the Blackboard design doc (Will, 2026-09-09 / 2026-11-25; internal, not in this repo — the decisions this draft leans on are inlined where used: D3 Prometheus-without-Blackboard-unchanged, D4 open/closed line, D9 orphan board, D10 stateless coordinator, D11 coordinator-decides-merges + two acceptance gates, D13 ACP approval rule, and **D18: a pillar's actions go through the daemon API under the gate, never through hook responses**); `docs/contracts/hooks.md` (the event contract this extends); `docs/PAIRING-APPROVAL-API.md` and `docs/contracts/device-scoping.md` (the credential model a worker or client joins through). File paths are relative to the repo root; names, not line numbers.
+**References:** the Blackboard design doc (Will, 2026-09-09 / 2026-11-25; internal, not in this repo — the decisions this draft leans on are inlined where used: D3 Prometheus-without-Blackboard-unchanged, D4 open/closed line, D9 orphan board, D10 stateless coordinator, D11 coordinator-decides-merges + two acceptance gates, D13 ACP approval rule, **D18: a pillar's actions go through the daemon API under the gate, never through hook responses**, and **D22: the pillar's credential is a limited scope — Blackboard routes only, never approvals/pairing/config; granted once by Will, revocable, audit names the pillar**); `docs/contracts/hooks.md` (the event contract this extends); `docs/PAIRING-APPROVAL-API.md` and `docs/contracts/device-scoping.md` (the credential model a worker or client joins through). File paths are relative to the repo root; names, not line numbers.
 
 ---
 
@@ -40,7 +40,7 @@
 
 ## 2. Board layout (orphan branch)
 
-The board is an orphan branch in the repo the mission works on. Default ref: `refs/blackboard/<mission-id>`; the working name `blackboard` is an alias for the single-mission case. Never merged into `main`, never checked out by a worker.
+The board is an orphan branch in the repo the mission works on. Default ref: `refs/blackboard/<mission-id>`; the working name `blackboard` is an alias for the single-mission case. **A mission id is required**: the bare ref `refs/blackboard` is never written — git cannot hold both a ref and a directory of the same name, so a bare write would block every per-mission ref. Never merged into `main`, never checked out by a worker.
 
 **The ref namespace is custom, and that has consequences this contract states rather than hides.** `refs/blackboard/*` is outside `refs/heads/` and `refs/remotes/`, so:
 
@@ -69,7 +69,7 @@ refs/blackboard/<mission-id>
 Rules:
 
 - **Reads never check out.** A worker reads `git show blackboard:roadmap.md` (or the ref's full name). The board is fetched on demand, narrow: the roadmap is the only thing identical for every agent.
-- **Writes are commits on the orphan branch**, one logical change per commit, message carries the item id and the actor. Coordination writes never trigger CI (the branch is not `main`, no PR is opened for it; a forge adapter, if ever wanted, is a view for humans, not part of coordination).
+- **Writes are commits on the orphan branch**, one logical change per commit, message carries the item id and the actor. **Every board write is a compare-and-swap**: `git update-ref <ref> <new> <old>` against the tip the writer read; on a mismatch the writer re-reads and retries, never clobbers. There ARE several writers: the run harness (branch results), the merge flow (merged results), the task-MD generator, and the human's amendments through Beacon — serialization is the CAS, not an assumption of a single writer. Coordination writes never trigger CI (the branch is not `main`, no PR is opened for it; a forge adapter, if ever wanted, is a view for humans, not part of coordination).
 - **Pushing the board is optional.** Local-first; a remote board ref is a backup, not a requirement.
 - **Append-only where it matters:** `interpretations.md` and the results files are never rewritten; a correction is a new entry that references the old. `roadmap.md` changes only by amendment (section 4).
 - **Retention is open** (design doc open question): when a mission's board is archived and what survives in the long-term wiki is undecided; nothing in v0 deletes board history.
@@ -89,7 +89,7 @@ Each item carries, in both `roadmap.md` (table) and `roadmap.json` (generated), 
 | `status` | **Not a stored field.** Computed by open code from board state + run events: `pending` / `running` / `branch-green` / `merged` / `blocked` / `amended`. It appears in the computed overlay (a VIEW of open-computed facts — the §7 records — never a pillar decision; D4 reserves "is this done" for open code). Neither `roadmap.md` nor `roadmap.json` carries a status column: status drifts, the computation is the truth. The pillar and Beacon render the overlay; they do not decide it. |
 | `owner_hint` | Optional: the agent kind best suited (coder, critic, …). Advisory; the coordinator decides. |
 
-**The mission text is immutable.** The coordinator can never edit `mission.md`. A roadmap change is an amendment (section 4), made by the human through Beacon; `mission.amended` (section 8) tells the pillar.
+**The mission text is immutable.** The coordinator can never edit `mission.md`. A roadmap change is an amendment (section 4), made by the human through Beacon; `mission_amended` (section 8) tells the pillar.
 
 **Parsing is open code.** `roadmap.json` is generated from `roadmap.md` by an open generator (one source of truth, the human-readable file); a worker or pillar that wants items reads the JSON. A malformed roadmap is a named error, never a partial parse.
 
@@ -117,14 +117,14 @@ Supersedes: <entry ref or none>
 
 An interpretation stays resolved once recorded. A later conflict with an earlier interpretation is a NEW entry that references the old — never an edit. The classifier itself (interpretation vs amendment) is pillar code, closed; the LOG FORMAT and the append-only rule are this contract, open.
 
-An amendment changes `roadmap.md` (and regenerates `roadmap.json`) by the human's hand through Beacon; the daemon emits `mission.amended` with the diff reference. The coordinator never writes the roadmap.
+An amendment changes `roadmap.md` (and regenerates `roadmap.json`) by the human's hand through Beacon; the daemon emits `mission_amended` with the diff reference. The coordinator never writes the roadmap.
 
 ---
 
 ## 5. Branch naming and worktrees
 
 - **Branch names carry provenance:** `bb/<mission>/<item-id>/<agent>`. The coordination graph can be rebuilt from `git branch` and `git log` alone. `<agent>` is the acting agent's stable identity (section 10), not a model name.
-- **Worktree per run** (open piece, off by default): each run gets its own worktree and branch, removed when the run completes. With the feature off, runs stay in place as today (the Loop Manager's single-worker behavior is unchanged). The coding sandbox's full-clone isolation is a SEPARATE mechanism and stays as it is; the worktree piece is for Loop Manager runs in the operator's own repo, where two workers in one checkout break.
+- **Worktree per run** (open piece, off by default): each run gets its own worktree and branch, removed when the run completes. **Removal never discards uncommitted work**: any dirty state at run end (a failed, stopped or timed-out run) is first committed as a WIP commit on the run's branch — a still-detached worktree gets a `coding/wip-<name>` branch — and the branch is named in the run's report; if the work cannot be saved, the checkout is left in place. Never `--force` away uncommitted work (deleting data that cannot be regenerated is a charter hard stop). With the feature off, runs stay in place as today (the Loop Manager's single-worker behavior is unchanged). The coding sandbox's full-clone isolation is a SEPARATE mechanism and stays as it is; the worktree piece is for Loop Manager runs in the operator's own repo, where two workers in one checkout break.
 - **Conflict prediction is pillar work:** on a timer, diff each live worktree against base (`--name-only`). Two workers on the same file is caught while both run. The open side only exposes the worktree list and the base ref; the diffing and the warning are the pillar's.
 - **Merging:** the coordinator decides; the open merge tool (section 7) enforces. Merge order follows `depends_on`. Conflicts escalate through the amendment/interpretation classifier; **never resolved by a merge strategy flag** — the tool returns the conflict as a result.
 
@@ -152,7 +152,7 @@ A task MD is regenerated when the board state it draws from changes (a dependenc
 
 ### The integration branch
 
-The mission's **integration branch** is `bb/<mission>/integrate`, created by open code from `main` (or the repo's default branch) when the mission starts. It is where worker branches merge, in dependency order; it is NOT `main`. The post-merge acceptance check runs on a fresh checkout of the integration branch's tip AFTER the merge commit. Promoting the integration branch to `main` is a separate, human-gated act (a PR or the operator's own merge) — this protocol never pushes to `main`, exactly as the repo's standing rules require. Who creates it: the mission-start piece (open code, §12); the merge tool refuses to merge into a ref that does not exist.
+The mission's **integration branch** is `bb/<mission>/integrate`, created by open code from `main` (or the repo's default branch) when the mission starts. It is where worker branches merge, in dependency order; it is NOT `main`. The integration branch is **always green**: the merge tool builds the merge commit in a temporary worktree, runs the post-merge acceptance check on THAT commit, and advances the branch by compare-and-swap (`update-ref <ref> <merge> <old>`) ONLY when the check is green (accept-before-advance). On red the branch does not move and `merge_result` carries the red record. Promoting the integration branch to `main` is a separate, human-gated act (a PR or the operator's own merge) — this protocol never pushes to `main`, exactly as the repo's standing rules require. Who creates it: the mission-start piece (open code, §12); the merge tool refuses to merge into a ref that does not exist.
 
 ### The merge tool (open, off by default)
 
@@ -160,13 +160,14 @@ A daemon tool (`bb_merge`, name provisional) that:
 
 - **requires the intent block as an argument** — the worker's brief statement of what changed and why. The gate rejects the call without it; enforcement is in the tool, not in instructions.
 - checks the item's dependencies: every `depends_on` item's post-merge result is green, else refuse with the missing ids named.
-- attempts the merge of `bb/<mission>/<item>/<agent>` into the mission's integration branch (`bb/<mission>/integrate`, defined above). **A conflict is returned as a result** (the conflicted paths, the two sides' refs), never resolved with `-X ours/theirs` or any strategy flag. The coordinator escalates it.
-- on a clean merge, runs the **post-merge acceptance check**: the item's acceptance command on the INTEGRATED tree (a fresh checkout of the integration branch's tip after the merge commit, not the worker's worktree).
-- stores the result at `results/merged/<item-id>/<merge-id>.json`, separately from the branch-local result. Emits `merge.result` (section 8).
+- merges `bb/<mission>/<item>/<agent>` into the mission's integration branch (`bb/<mission>/integrate`) **and nothing else** — any other `into`, or an empty mission, is refused. The merge is built in a TEMPORARY worktree of the integration tip; the operator's checkout is never touched. **A conflict is returned as a result** (the conflicted paths, the two sides' refs), never resolved with `-X ours/theirs` or any strategy flag. The coordinator escalates it.
+- on a clean merge, runs the **post-merge acceptance check on the merge commit** (accept-before-advance): the item's acceptance command, **read verbatim from `roadmap.json` on the board by item id** — the caller supplies no command, so nothing but the human-owned roadmap decides what runs — on a temporary detached checkout of the merge commit, **through the coding sandbox** (the same read/write shell floors and env allowlist a coding run's acceptance uses, with that checkout as the only workspace; never the daemon's environment). A refused floor means nothing ran.
+- **advances the integration branch ONLY on green**, by compare-and-swap `update-ref <ref> <merge> <old>`; on red the branch stays where it was and the result carries the red record. A concurrent mover of the ref refuses the advance, never clobbers.
+- stores the result at `results/merged/<item-id>/<merge-id>.json`, separately from the branch-local result, **with the captured output stored in the board tree next to the record** (`<merge-id>.output.txt` — a referenced blob; a dangling blob would be gc-pruned). Emits `merge_result` (section 8).
 
 ### Who writes the branch-local result
 
-The **run harness** writes `results/branch/<item-id>/<run-id>.json` at run end — for a native coding run, the same place the run's acceptance command already executes (`coding/session.py`); the new piece is the RECORD on the board, not a second acceptance run. An outside ACP worker reports its own acceptance outcome in its final message; the harness records that report as the branch-local result with `source: "agent-report"` (lower trust, named), never as a daemon-run check. `run.finished` (§8) carries this record; a run that ends without one carries `branch_acceptance: null` and the coordinator treats the item as not branch-green.
+The **run harness** writes `results/branch/<item-id>/<run-id>.json` at run end — for a native coding run, the same place the run's acceptance command already executes (`coding/session.py`); the new piece is the RECORD on the board, not a second acceptance run. An outside ACP worker reports its own acceptance outcome in its final message; the harness records that report as the branch-local result with `source: "agent-report"` (lower trust, named), never as a daemon-run check. `run_finished` (§8) carries this record; a run that ends without one carries `branch_acceptance: null` and the coordinator treats the item as not branch-green.
 
 ### The two results
 
@@ -182,7 +183,7 @@ The **run harness** writes `results/branch/<item-id>/<run-id>.json` at run end �
   "exit_code": 0,
   "passed": true,                   // daemon-computed: exit_code == expected_exit_code
   "source": "daemon-run" | "agent-report",   // agent-report: an outside worker's own account, lower trust
-  "output_ref": "<path or blob ref to the captured output>",
+  "output_ref": "<path in the board tree to the captured output, stored beside the record>",
   "started_at": 0.0, "ended_at": 0.0,
   "intent": { "what": "...", "why": "..." }   // merged only: the block the merge tool required
 }
@@ -200,17 +201,17 @@ An additive minor version of the hook contract (`hooks.md` section 12): new even
 
 | Event | Emitted by | `facts` (daemon-computed) | `content` |
 |---|---|---|---|
-| `run.started` | Prometheus (run launch) | `mission`, `item_id`, `worker` (acting identity), `branch`, `worktree`, `run_id` | `task` (the task MD text, `external` — it quotes the roadmap) |
-| `run.finished` | Prometheus (run end, success path) | `run_id`, `item_id`, `branch_acceptance` (the result record, section 7; null when the run ended without one), `journal_ref` | `intent` (the worker's intent block, `model`) |
-| `run.failed` | Prometheus (run end, ANY non-success exit: failure, stop, cancel, timeout) | `run_id`, `item_id`, `stop_reason` (`failed` \| `stopped` \| `cancelled` \| `timeout`), `last_journal_ref` | none |
-| `worker.escalated` | Prometheus (the worker's decision request reaches the daemon) | `run_id`, `item_id` (the daemon supplies no classification hint — interpretation vs amendment is the pillar's) | `request` (the decision request text, `model`) |
-| `worker.context_pressure` | Prometheus (the loop's context pre-flight crosses a threshold) | `run_id`, `session_id`, `used`, `size`, `threshold` | none |
-| `merge.result` | Prometheus (the merge tool) | `item_id`, `merge_id`, `merged_acceptance` (the result record), `conflict` (null or the conflicted paths) | `intent` (`model`) |
-| `mission.amended` | Prometheus (from Beacon, the human's roadmap change) | `mission`, `diff_ref`, `amended_by` (the operator's credential id) | none |
+| `run_started` | Prometheus (run launch) | `mission`, `item_id`, `worker` (acting identity), `branch`, `worktree`, `run_id` | `task` (the task MD text, `external` — it quotes the roadmap) |
+| `run_finished` | Prometheus (run end, success path) | `run_id`, `item_id`, `branch_acceptance` (the result record, section 7; null when the run ended without one), `journal_ref` | `intent` (the worker's intent block, `model`) |
+| `run_failed` | Prometheus (run end, ANY non-success exit: failure, stop, cancel, timeout) | `run_id`, `item_id`, `stop_reason` (`failed` \| `stopped` \| `cancelled` \| `timeout`), `last_journal_ref` | none |
+| `worker_escalated` | Prometheus (the worker's decision request reaches the daemon) | `run_id`, `item_id` (the daemon supplies no classification hint — interpretation vs amendment is the pillar's) | `request` (the decision request text, `model`) |
+| `worker_context_pressure` | Prometheus (the loop's context pre-flight crosses a threshold) | `run_id`, `session_id`, `used`, `size`, `threshold` | none |
+| `merge_result` | Prometheus (the merge tool) | `item_id`, `merge_id`, `merged_acceptance` (the result record), `conflict` (null or the conflicted paths) | `intent` (`model`) |
+| `mission_amended` | Prometheus (from Beacon, the human's roadmap change) | `mission`, `diff_ref`, `amended_by` (the operator's credential id) | none |
 
-**Every exit path emits.** Like `turn_end` in hooks/1.0, a run that is stopped, cancelled or times out emits `run.failed` with the matching `stop_reason` — a coordinator waiting on a run is never left without an event. `run.finished` is the success path only (the branch-local acceptance ran and the run exited 0); a green acceptance on a non-zero run exit is still `run.failed` (the run did not finish cleanly).
+**Every exit path emits.** Like `turn_end` in hooks/1.0, a run that is stopped, cancelled or times out emits `run_failed` with the matching `stop_reason` — a coordinator waiting on a run is never left without an event. `run_finished` is the success path only (the branch-local acceptance ran and the run exited 0); a green acceptance on a non-zero run exit is still `run_failed` (the run did not finish cleanly).
 
-**Naming.** The seven names use dots (`run.started`) where hooks/1.0 uses snake_case (`turn_start`). This is deliberate: the dot separates the run-level group from the turn-level group at a glance, and the registry keys on the exact string either way. A minor version may add names; it never renames, so the two conventions coexist without ambiguity. (If Will's reviewer prefers one convention, the rename happens HERE, before anything subscribes — not after.)
+**Naming.** One convention in one registry: the seven names are snake_case (`run_started`), exactly like every hooks/1.0 event (`turn_start`). Decided by Will's reviewer (2026-11-26) and renamed in the run-events PR before anything subscribed; no dotted aliases exist.
 
 Rules carried over from `hooks/1.0` unchanged:
 
@@ -223,11 +224,13 @@ Rules carried over from `hooks/1.0` unchanged:
 
 **A pillar's actions go through the daemon API under the gate (D18), never through hook responses.** The hook channel carries events OUT; the API carries actions IN. There is no "modify" or "veto" on a run event.
 
-**The action path, and its credential tier — stated loudly because it is a permission decision.** Tools are not directly callable by API clients today; a pillar that wants to start a run or request a merge needs a ROUTE, and the route's tier is Will's to decide:
+**The action path, and its credential tier — D22 (decided by Will, 2026-11-26).** Tools are not directly callable by API clients today; a pillar that wants to start a run or request a merge needs a ROUTE. The pillar gets a **LIMITED SCOPE, not an owner-device credential**: a dedicated credential that can call ONLY the Blackboard routes:
 
-- **Starting a run:** `POST /api/code` is operator-only today (`web/route_access.py`); a scoped token cannot start runs (device-scoping default-deny). The coordinator pillar therefore needs either (a) an **owner-device credential** the operator grants it explicitly (the same tier a Beacon on another machine holds via an owner code, `device-scoping.md` §6.5), or (b) a new route under `SCOPED_ALLOWED` with its own limits. **This draft proposes (a)** — an owner-device credential, granted by the person at the machine, revocable like any device — and flags it for Will's reviewer as the one place the protocol assumes a permission grant. Nothing is widened silently: until the operator grants the credential, the pillar can observe events and advise, and every action route answers 403.
-- **Requesting a merge:** the merge tool is a daemon tool; the pillar's path is a thin operator-only route (`POST /api/blackboard/merge`, name provisional) that validates the intent block and calls the same tool code under the gate. Same tier as (a). The route does not exist yet (§12); the draft names it so the tier decision is visible before it is built.
-- The pillar's credential is **never the daemon's API token** (hooks.md §11's rule, verbatim). It is a device credential with its own id, so every action's audit row names the pillar that took it.
+- `POST /api/blackboard/run` (name provisional) — start a run for a roadmap item (the daemon's coding-run path under the gate; NOT the operator-only `POST /api/code`).
+- `POST /api/blackboard/merge` (name provisional) — request a merge; validates the intent block and calls the same merge-tool code under the gate.
+- `GET /api/blackboard/board` (name provisional) — read the board (roadmap, results, overlay).
+
+**It can never answer approvals, pair devices or change config** — those routes refuse the pillar scope outright, the same default-deny the device-scoping contract already enforces. The credential is **granted once by Will, revocable**, and every action's audit row **names the pillar** that took it. It is **never the daemon's API token** (hooks.md §11's rule, verbatim). The routes do not exist yet (§12); until they do, the pillar can observe events and advise, and every action route answers 403. Nothing is widened silently.
 
 **Liveness** (candidate, to be checked once the seam exists): for native workers, the daemon's own run state; for outside workers, ACP session state (the background list and idle state). Never stored in git, and fine to lose.
 
@@ -299,7 +302,7 @@ One handoff is one ACP session. The protocol core is Prometheus's (`src/promethe
 2. **Run-level events as `hooks/1.1`** — the seven events, observe-only, emission sites, the manifest version range. No pillar transport exists yet; the events fire into the existing hook registry (operator hooks may subscribe; a pillar subscription loads when the seam exists).
 3. **Roadmap schema + generator + parse** — `roadmap.md` → `roadmap.json`, the item fields (§3), cycle detection, named parse errors. The mission-start piece creates the integration branch (§7) here.
 4. **Task MD generation** — the composer (§6): roadmap + board state → `tasks/<item-id>.md`, regenerated when its inputs change.
-5. **Branch-local acceptance capture** — the run harness writes `results/branch/<item-id>/<run-id>.json` at run end (§7); `run.finished` carries it.
+5. **Branch-local acceptance capture** — the run harness writes `results/branch/<item-id>/<run-id>.json` at run end (§7); `run_finished` carries it.
 6. **Worktree per run** for Loop Manager runs, removed on completion; off → runs in place.
 7. **Merge tool** — intent block required, conflict returned as a result, dependency check. Two reviews (it changes what can merge).
 8. **Post-merge acceptance check** — re-runs the item's acceptance on the integrated tree, stores the result separately. Two reviews ("is this done").
@@ -313,10 +316,10 @@ Each: suite failure set unchanged vs baseline, parity replay, overhead with the 
 
 - **`roadmap.json` generated from `roadmap.md`**, not a second hand-edited source: one truth, the human-readable file; the machine form is a build artifact.
 - **Status is computed, never stored on the roadmap**: a status column drifts; the overlay derives from board state + events. The overlay is a VIEW of open-computed facts, never a pillar decision (D4).
-- **The integration branch is `bb/<mission>/integrate`**, created from `main` at mission start; promotion to `main` stays a human-gated act. The post-merge gate runs on its tip.
-- **The pillar's action credential is an owner-device credential** (§8), granted by the person at the machine, revocable — flagged for Will's reviewer as the protocol's one permission assumption. Never the API token.
+- **The integration branch is `bb/<mission>/integrate`**, created from `main` at mission start; promotion to `main` stays a human-gated act. **Accept-before-advance**: the post-merge gate runs on the merge commit and the branch advances only on green, so its tip is always green.
+- **The pillar's action credential is a LIMITED SCOPE (D22, decided by Will 2026-11-26)** (§8): Blackboard routes only — start a run, request a merge, read the board. Never approvals, pairing or config. Granted once by Will, revocable; the audit names the pillar. Never the API token.
 - **Critical requests over ACP are reject-only** (D13 as decided): the merge tool and the acceptance gates are daemon-side, so a coordinator driving an outside worker never needs the worker to approve anything critical.
 - **The task MD generator is open code**, the coordinator's choice of WHICH item is pillar: the composer is mechanical (roadmap + board state), the judgment is advisory.
 - **Run events carry the result RECORDS, not summaries**: `branch_acceptance` / `merged_acceptance` are the section 7 JSON with `expected_exit_code` and daemon-computed `passed`, so a consumer never re-derives "done" from prose.
-- **Every run exit path emits** (`run.failed` with a `stop_reason` for stop/cancel/timeout), like `turn_end`.
+- **Every run exit path emits** (`run_failed` with a `stop_reason` for stop/cancel/timeout), like `turn_end`.
 - **No mission concept in ACP**: the protocol maps handoffs to sessions and keeps the mission on the board. Two DAG-over-history systems (board history and LCM's DAG) are an open question, not a v0 commitment.
