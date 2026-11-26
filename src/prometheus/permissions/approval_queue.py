@@ -440,6 +440,10 @@ class ApprovalQueue:
     constructor argument now, so that queue can no longer be built.
     """
 
+    #: True on a channel that exists for prompts of its OWN kind (desktop tasks, hold lifts) and answers them only
+    #: through a person check. ``worker_queue`` prefers a queue where this is False.
+    own_prompts_only = False
+
     def __init__(
         self,
         *,
@@ -1204,6 +1208,37 @@ class ApprovalQueues:
         for q in self._queues:
             withdrawn += await q.withdraw_all(why=why)
         return withdrawn
+
+
+def worker_queue(surface: Any) -> Any | None:
+    """The queue a spawned worker's request is filed in: the gate-wide queue when there is one.
+
+    A worker's request is an ordinary tool-approval request, answered under the rules of the gate-wide queue (a
+    device token, never the API token: ``approve_action``). The desktop channel and the hold-lift channel are
+    queues of their OWN prompts, answered only by a person marked for them; a worker's request filed there (what
+    ``queues[0]`` gave when ``security.approval_queue.enabled`` is false, which is how Prometheus ships: the
+    hold-lift channel is always built) met their person check, and an owner device with no computer-use mark was
+    refused. So the gate-wide queue is looked for first, through any nesting. With none, a channel still hosts the
+    request (a worker can still ask), and the channel does not person-check what is not its own prompt.
+    """
+    flat: list[Any] = []
+
+    def walk(q: Any) -> None:
+        if q is None:
+            return
+        inner = getattr(q, "queues", None)
+        if inner is not None and not hasattr(q, "request_approval"):
+            for sub in inner:
+                walk(sub)
+        else:
+            flat.append(q)
+
+    walk(surface)
+    askable = [q for q in flat if hasattr(q, "request_approval")]
+    for q in askable:
+        if not getattr(q, "own_prompts_only", False):
+            return q
+    return askable[0] if askable else None
 
 
 def is_desktop_request(action: Any) -> bool:

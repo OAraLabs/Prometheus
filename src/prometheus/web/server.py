@@ -6528,7 +6528,9 @@ def create_app(
                 "detail": "no running worker holds that token"})
         _withdraw_when_workers_end(manager)
         queue = app.state.approval_queue
-        primary = queue.queues[0] if hasattr(queue, "queues") else queue
+        from prometheus.permissions.approval_queue import worker_queue as _worker_queue
+
+        primary = _worker_queue(queue)
         if primary is None or not hasattr(primary, "request_approval"):
             return {"result": "denied",
                     "reason": "no approval queue: nobody can approve a worker's request"}
