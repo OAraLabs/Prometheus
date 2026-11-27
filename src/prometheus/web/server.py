@@ -1117,6 +1117,26 @@ def create_app(
         coding_stream.subscribe_lifecycle()
     app.state.coding_stream = coding_stream
 
+    # Run-level events (hooks/1.1, D17) — off by default. Wired HERE, beside
+    # the coding live-stream that reads the same terminal task signals, so it
+    # does not depend on SENTINEL being enabled. With the key absent or false
+    # nothing is subscribed; with it true, terminal coding-run signals become
+    # run_finished / run_failed for whatever hooks subscribe (observe-only).
+    try:
+        from prometheus.hooks.run_events import RunEventEmitter, run_events_enabled
+
+        if run_events_enabled(config) and signal_bus is not None:
+            _hook_exec = getattr(agent_loop, "_hook_executor", None) if agent_loop else None
+            if _hook_exec is not None:
+                _run_emitter = RunEventEmitter(_hook_exec)
+                _run_emitter.subscribe(signal_bus)
+                app.state.run_event_emitter = _run_emitter
+                logger.info("Run-level events enabled (hooks/1.1, observe-only)")
+            else:
+                logger.warning("blackboard.run_events.enabled but no hook executor — run events not wired")
+    except Exception:
+        logger.warning("Run-event wiring failed", exc_info=True)
+
     # ── Boot-SHA staleness (merged-but-dark detector) ───────────────
     # running_sha = repo HEAD captured at process boot (frozen on app.state);
     # tree_head = live repo HEAD now. They differ when new code is on disk that
