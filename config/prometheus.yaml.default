@@ -1798,7 +1798,19 @@ escalation:
 # ACP — the Agent Client Protocol at the edge (EXPERIMENTAL, off by default).
 # Editors and outside agents speak ACP v2 to Prometheus; the internal session
 # model is unchanged. With enabled: false nothing in prometheus/acp/ runs and
-# no route imports it. Design: docs/design/acp-core.md. The approval rule for
-# ACP-borne approvals is undecided; no ACP peer can approve anything yet.
+# no route imports it. Design: docs/design/acp-core.md. Approvals over ACP
+# are a lower-trust channel: ordinary actions only, critical ones never
+# (docs/design/acp-approval-channel.md).
 acp:
   enabled: false
+  # Outside agents Prometheus may DRIVE as an ACP client (the registry ships
+  # EMPTY; each entry is an explicit operator grant, like a paired device).
+  # A driven agent's permission requests go through the same gate as
+  # Prometheus's own tool calls: a gate ALLOW answers the agent directly
+  # (audited, naming the agent), a gate APPROVE asks the owner approve-once;
+  # nothing outside this registry launches. Example:
+  #   clients:
+  #     claude-code:
+  #       command: ["claude-code-acp"]
+  #       description: "Claude Code over ACP"
+  clients: {}
