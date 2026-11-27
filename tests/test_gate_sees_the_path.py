@@ -244,8 +244,9 @@ def test_no_mapped_parameter_is_missing_from_its_tool():
 
     by_name = {s["name"]: s for s in create_tool_registry({}, None).list_schemas()}
     # Tools registered only when their subsystem is on: checked against their own input model.
+    from prometheus.tools.builtin.bb_merge import BbMergeTool
     from prometheus.tools.builtin.lsp import LSPTool
-    for conditional in (LSPTool(),):
+    for conditional in (LSPTool(), BbMergeTool()):
         by_name.setdefault(conditional.name, {"input_schema": conditional.input_model.model_json_schema()})
     for tool, param in TOOL_PATH_PARAM.items():
         schema = by_name.get(tool)

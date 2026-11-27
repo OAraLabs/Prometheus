@@ -141,6 +141,12 @@ TOOL_PATH_PARAM: dict[str, str] = {
     # denied_paths and no workspace prompt — task_create is not in
     # _APPROVE_TOOLS.
     "task_create": "watch_dir",
+    # bb_merge (registered only when blackboard.merge_tool.enabled): the
+    # repo is a WRITTEN directory — the merge commit and the board ref
+    # live in its object store. DIR_FIELD_WRITE on the schema makes the
+    # workspace boundary and denied_paths apply; an unmapped repo fell
+    # through to ALLOW anywhere on disk (review #2 on #966).
+    "bb_merge": "repo",
 }
 
 #: Tools with a path-SHAPED parameter that is not a filesystem path, each with

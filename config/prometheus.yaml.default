@@ -1666,6 +1666,20 @@ hooks: {}
 blackboard:
   run_events:
     enabled: false
+# protocol draft is docs/contracts/blackboard.md. merge_tool.enabled
+# registers bb_merge: merges a worker branch bb/<mission>/<item>/<agent>
+# into bb/<mission>/integrate ONLY (any other target, or an empty mission,
+# is refused). The intent block (what/why) is REQUIRED as an argument;
+# dependencies must carry green post-merge results on the board; a
+# conflict is returned as a result, never resolved with a strategy flag.
+# The merge is built in a temporary worktree (the operator's checkout is
+# never touched) and the post-merge acceptance check runs on the merge
+# commit: the integration branch advances ONLY on green
+# (accept-before-advance), by compare-and-swap. repo is a declared written
+# directory path — the workspace boundary applies. Off: the tool is not
+# registered and nothing changes. run_events (hooks/1.1) is above.
+  merge_tool:
+    enabled: false
 
 evals:
   results_dir: "~/.prometheus/eval_results"

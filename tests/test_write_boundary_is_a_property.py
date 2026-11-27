@@ -237,7 +237,7 @@ def _schema_for(tool_name: str):
         "grep": "grep", "glob": "glob", "video_generate": "video_generate",
         "task_create": "task_create", "read_file": "file_read",
         "write_file": "file_write", "edit_file": "file_edit",
-        "image_generate": "image_generate", "lsp": "lsp",
+        "image_generate": "image_generate", "lsp": "lsp", "bb_merge": "bb_merge",
     }
     mod = importlib.import_module(f"prometheus.tools.builtin.{modules[tool_name]}")
     models = [
@@ -299,7 +299,7 @@ def test_every_declared_path_param_declares_its_access():
 _KNOWN = {
     "notebook_edit", "download_file", "tts", "youtube_transcript", "grep",
     "glob", "video_generate", "task_create", "read_file", "write_file",
-    "edit_file", "image_generate", "lsp",
+    "edit_file", "image_generate", "lsp", "bb_merge",
 }
 
 

@@ -1,0 +1,453 @@
+"""The blackboard merge tool — intent required, dependencies green, conflict
+as a result. Real git repos in tmp_path; the board is a real orphan ref."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from prometheus.tools.base import ToolExecutionContext  # noqa: E402
+from prometheus.tools.builtin.bb_merge import (  # noqa: E402
+    BbMergeInput,
+    BbMergeTool,
+    MergeIntent,
+    merge_tool_enabled,
+)
+
+
+def _git(cwd: Path, *args: str) -> str:
+    r = subprocess.run(["git", "-C", str(cwd), *args],
+                       capture_output=True, text=True, check=True)
+    return r.stdout.strip()
+
+
+@pytest.fixture()
+def repo(tmp_path: Path) -> Path:
+    r = tmp_path / "repo"
+    r.mkdir()
+    _git(r, "init", "-q", "-b", "main")
+    _git(r, "config", "user.email", "test@example.invalid")
+    _git(r, "config", "user.name", "Test")
+    (r / "base.txt").write_text("base\n")
+    (r / "check.sh").write_text("#!/bin/sh\nexit 0\n")
+    _git(r, "add", ".")
+    _git(r, "commit", "-q", "-m", "init")
+    _git(r, "branch", "bb/m1/integrate")
+    from prometheus.coding.acceptance import _write_board_record
+    _write_board_record(r, board_ref="refs/blackboard", mission="m1",
+                        path="roadmap.json", content=json.dumps({"items": [
+                            {"id": "m1.i1", "acceptance": {"command": "sh check.sh"}},
+                            {"id": "m1.i2", "acceptance": {"command": "sh check.sh"}},
+                            {"id": "m1.red", "acceptance": {"command": "exit 1"}},
+                        ]}))
+    return r
+
+
+def _worker_branch(repo: Path, name: str, file: str, text: str) -> None:
+    _git(repo, "checkout", "-q", "-b", name)
+    (repo / file).write_text(text)
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", f"work on {name}")
+    _git(repo, "checkout", "-q", "main")
+
+
+def _board_result(repo: Path, mission: str, item: str, exit_code: int,
+                  tree: str | None = None) -> None:
+    """Write a post-merge result onto an orphan board ref, no checkout.
+    ``tree`` defaults to the integration tip (a LANDED merge); pass a
+    commit off the branch to model a refused advance."""
+    if tree is None:
+        tree = _git(repo, "rev-parse", f"bb/{mission}/integrate")
+    rec = json.dumps({"item_id": item, "kind": "merged", "exit_code": exit_code,
+                      "passed": exit_code == 0, "tree": tree, "command": "true"})
+    blob = subprocess.run(["git", "-C", str(repo), "hash-object", "-w", "--stdin"],
+                          input=rec, capture_output=True, text=True, check=True).stdout.strip()
+    ref = f"refs/blackboard/{mission}"
+    # read the current tree (or start empty), add the entry, commit-tree
+    path = f"results/merged/{item}/r1.json"
+    try:
+        parent = _git(repo, "rev-parse", ref)
+        tree = subprocess.run(["git", "-C", str(repo), "ls-tree", "-r", parent],
+                              capture_output=True, text=True, check=True).stdout
+    except subprocess.CalledProcessError:
+        parent = None
+        tree = ""
+    entries = {}
+    for line in tree.splitlines():
+        meta, p = line.split("\t", 1)
+        entries[p] = meta.split()[2]
+    entries[path] = blob
+    # nested paths need nested trees; build them bottom-up
+    new_tree = _write_tree(repo, entries)
+    args = ["git", "-C", str(repo), "commit-tree", new_tree, "-m", "board"]
+    if parent:
+        args += ["-p", parent]
+    commit = subprocess.run(args, capture_output=True, text=True, check=True).stdout.strip()
+    _git(repo, "update-ref", ref, commit)
+
+
+def _write_tree(repo: Path, entries: dict[str, str]) -> str:
+    """Build a git tree object from {path: blob_sha}, nesting as needed."""
+    dirs: dict = {}
+    files: dict = {}
+    for p, sha in entries.items():
+        if "/" in p:
+            head, rest = p.split("/", 1)
+            dirs.setdefault(head, {})[rest] = sha
+        else:
+            files[p] = sha
+    lines = [f"100644 blob {sha}\t{p}\n" for p, sha in sorted(files.items())]
+    for d, sub in sorted(dirs.items()):
+        sub_tree = _write_tree(repo, sub)
+        lines.append(f"040000 tree {sub_tree}\t{d}\n")
+    return subprocess.run(["git", "-C", str(repo), "mktree"],
+                          input="".join(lines), capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+
+def _args(repo: Path, **kw) -> BbMergeInput:
+    base = dict(repo=str(repo), branch="bb/m1/i1/agent-a", into="bb/m1/integrate",
+                item_id="m1.i1", intent=MergeIntent(what="added the thing", why="the item asks for it"))
+    base.update(kw)
+    return BbMergeInput(**base)
+
+
+@pytest.fixture()
+def tool() -> BbMergeTool:
+    return BbMergeTool()
+
+
+@pytest.fixture()
+def ctx(tmp_path: Path) -> ToolExecutionContext:
+    return ToolExecutionContext(cwd=tmp_path)
+
+
+# ── the gate ────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("config,expected", [
+    (None, False), ({}, False),
+    ({"blackboard": {}}, False),
+    ({"blackboard": {"merge_tool": {}}}, False),
+    ({"blackboard": {"merge_tool": {"enabled": "true"}}}, False),
+    ({"blackboard": {"merge_tool": {"enabled": True}}}, True),
+])
+def test_the_gate_is_literal_true_only(config, expected):
+    assert merge_tool_enabled(config) is expected
+
+
+def test_shipped_template_keeps_the_tool_off():
+    import yaml
+    template = Path(__file__).parent.parent / "config" / "prometheus.yaml.default"
+    cfg = yaml.safe_load(template.read_text())
+    assert merge_tool_enabled(cfg) is False
+
+
+def test_the_intent_block_is_required_by_the_schema():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        BbMergeInput(repo="/x", branch="b", into="main", item_id="i")  # no intent
+    with pytest.raises(ValidationError):
+        MergeIntent(what="", why="y")
+    with pytest.raises(ValidationError):
+        MergeIntent(what="x", why="")
+
+
+# ── rule 1: no intent, no merge ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_blank_intent_is_refused_before_any_git(repo, tool, ctx):
+    _worker_branch(repo, "bb/m1/i1/agent-a", "f.txt", "work\n")
+    args = _args(repo)
+    # pydantic models are mutable by default; blank the field post-validation
+    args.intent.what = "   "
+    res = await tool.execute(args, ctx)
+    assert res.is_error
+    assert "intent" in res.output
+    assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+
+
+# ── rule 2: dependencies ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_missing_dependency_result_refuses_with_the_id_named(repo, tool, ctx):
+    _worker_branch(repo, "bb/m1/i2/agent-a", "f.txt", "work\n")
+    res = await tool.execute(_args(repo, branch="bb/m1/i2/agent-a", item_id="m1.i2",
+                                 depends_on=["m1.i1"]), ctx)
+    assert res.is_error
+    assert "m1.i1" in res.output
+    assert _git(repo, "rev-parse", "HEAD") == _git(repo, "rev-parse", "main")
+
+
+@pytest.mark.asyncio
+async def test_a_non_green_dependency_refuses(repo, tool, ctx):
+    _board_result(repo, "m1", "m1.i1", exit_code=1)
+    _worker_branch(repo, "bb/m1/i2/agent-a", "f.txt", "work\n")
+    res = await tool.execute(_args(repo, branch="bb/m1/i2/agent-a", item_id="m1.i2",
+                                 depends_on=["m1.i1"], mission="m1"), ctx)
+    assert res.is_error
+    assert "m1.i1" in res.output
+
+
+@pytest.mark.asyncio
+async def test_a_green_dependency_allows_the_merge(repo, tool, ctx):
+    _board_result(repo, "m1", "m1.i1", exit_code=0)
+    _worker_branch(repo, "bb/m1/i2/agent-a", "f.txt", "work\n")
+    res = await tool.execute(_args(repo, branch="bb/m1/i2/agent-a", item_id="m1.i2",
+                                 depends_on=["m1.i1"], mission="m1"), ctx)
+    assert not res.is_error, res.output
+    body = json.loads(res.output)
+    assert body["merged"] is True
+    assert body["acceptance"].startswith("green")
+    assert body["merged_acceptance"]["passed"] is True
+    # the integration branch advanced; the operator's checkout did NOT
+    assert _git(repo, "rev-parse", "bb/m1/integrate") == body["commit"]
+    assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    assert not (repo / "f.txt").exists()
+
+
+# ── rule 3: conflict is a result ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_conflict_is_returned_and_the_merge_aborted(repo, tool, ctx):
+    # two branches touching the same line
+    _git(repo, "checkout", "-q", "-b", "bb/m1/i1/agent-a")
+    (repo / "base.txt").write_text("side A\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "a")
+    _git(repo, "checkout", "-q", "bb/m1/integrate")
+    (repo / "base.txt").write_text("side B\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "b")
+    _git(repo, "checkout", "-q", "main")
+    head = _git(repo, "rev-parse", "HEAD")
+    integ = _git(repo, "rev-parse", "bb/m1/integrate")
+    res = await tool.execute(_args(repo), ctx)
+    assert res.is_error
+    body = json.loads(res.output)
+    assert body["merged"] is False
+    assert "base.txt" in body["conflict"]
+    # the tree is exactly where it started: merge aborted, no MERGE_HEAD
+    assert _git(repo, "rev-parse", "HEAD") == head
+    assert _git(repo, "rev-parse", "bb/m1/integrate") == integ  # ref did not move
+    assert not (repo / ".git" / "MERGE_HEAD").exists()
+    assert (repo / "base.txt").read_text() == "base\n"  # operator's checkout untouched
+
+
+@pytest.mark.asyncio
+async def test_a_clean_merge_commits_with_the_intent_in_the_message(repo, tool, ctx):
+    _worker_branch(repo, "bb/m1/i1/agent-a", "new.txt", "new\n")
+    res = await tool.execute(_args(repo), ctx)
+    assert not res.is_error, res.output
+    msg = _git(repo, "log", "-1", "--format=%B", "bb/m1/integrate")
+    assert "bb merge: m1.i1" in msg
+    assert "what: added the thing" in msg
+    assert "why: the item asks for it" in msg
+    # a merge commit, not a fast-forward
+    parents = _git(repo, "log", "-1", "--format=%P", "bb/m1/integrate").split()
+    assert len(parents) == 2
+
+
+@pytest.mark.asyncio
+async def test_unknown_branch_refused(repo, tool, ctx):
+    res = await tool.execute(_args(repo, branch="bb/m1/nope/agent-a"), ctx)
+    assert res.is_error
+    assert "unknown branch" in res.output
+
+
+@pytest.mark.asyncio
+async def test_a_dirty_operator_checkout_is_untouched(repo, tool, ctx):
+    """Review #2: the merge is built in a temp worktree — the operator's
+    dirty checkout is neither refused nor touched, and stays on main."""
+    _worker_branch(repo, "bb/m1/i1/agent-a", "f.txt", "work\n")
+    (repo / "base.txt").write_text("operator's uncommitted work\n")
+    head = _git(repo, "rev-parse", "HEAD")
+    res = await tool.execute(_args(repo), ctx)
+    assert not res.is_error, res.output
+    assert (repo / "base.txt").read_text() == "operator's uncommitted work\n"
+    assert _git(repo, "rev-parse", "HEAD") == head
+    assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    assert not (repo / ".git" / "MERGE_HEAD").exists()
+
+
+@pytest.mark.asyncio
+async def test_not_a_repo_refused(tmp_path, tool, ctx):
+    res = await tool.execute(_args(tmp_path), ctx)
+    assert res.is_error
+    assert "not a git repository" in res.output
+
+# ── review #2 fixes ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_into_must_be_the_missions_integration_branch(repo, tool, ctx):
+    _worker_branch(repo, "bb/m1/i1/agent-a", "f.txt", "work\n")
+    for bad in ("main", "bb/other/integrate", "bb/m1/whatever", "refs/heads/main"):
+        res = await tool.execute(_args(repo, into=bad), ctx)
+        assert res.is_error, bad
+        assert "integration branch" in res.output
+    assert _git(repo, "rev-parse", "main") == _git(repo, "rev-parse", "HEAD")
+
+
+@pytest.mark.asyncio
+async def test_empty_mission_refused(repo, tool, ctx):
+    _worker_branch(repo, "notbb/i1/agent", "f.txt", "work\n")
+    res = await tool.execute(_args(repo, branch="notbb/i1/agent", mission="",
+                                 into="bb/m1/integrate"), ctx)
+    assert res.is_error
+    assert "mission id required" in res.output
+
+
+@pytest.mark.asyncio
+async def test_red_acceptance_does_not_advance_the_integration_branch(repo, tool, ctx):
+    """Accept-before-advance: a red post-merge check keeps the ref where it
+    was; the result carries the red record."""
+    _worker_branch(repo, "bb/m1/red/agent-a", "f.txt", "work\n")
+    before = _git(repo, "rev-parse", "bb/m1/integrate")
+    res = await tool.execute(_args(repo, branch="bb/m1/red/agent-a", item_id="m1.red"), ctx)
+    assert res.is_error
+    body = json.loads(res.output)
+    assert body["merged"] is False
+    assert body["merged_acceptance"]["passed"] is False
+    assert _git(repo, "rev-parse", "bb/m1/integrate") == before
+    # the red record IS on the board
+    from prometheus.coding.acceptance import _write_board_record  # noqa: F401
+    rec = json.loads(_git(repo, "show",
+                          f"refs/blackboard/m1:results/merged/m1.red/{body['merged_acceptance']['merge_id']}.json"))
+    assert rec["passed"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_gate_sees_repo_as_a_written_directory():
+    """Review #2 finding 1: repo is a declared WRITTEN DIR path, so the
+    gate's workspace boundary applies — not an undeclared string that
+    falls through to ALLOW anywhere on disk."""
+    from prometheus.permissions.path_schema import declared_path_access, declared_path_params
+    schema = BbMergeInput.model_json_schema()
+    params = declared_path_params(schema)
+    assert "repo" in params
+    assert declared_path_access(schema).get("repo") == "write"
+
+
+@pytest.mark.asyncio
+async def test_a_repo_outside_the_workspace_prompts_at_the_gate(tmp_path):
+    """Through the REAL dispatch subject-builder: a bb_merge call on a repo
+    outside the workspace is not an ALLOW — the boundary sees the path."""
+    from prometheus.permissions.tool_paths import gate_path_for
+    outside = tmp_path / "elsewhere" / "repo"
+    outside.mkdir(parents=True)
+    schema = BbMergeInput.model_json_schema()
+    path, unknown = gate_path_for("bb_merge", {"repo": str(outside)}, schema=schema)
+    assert path is not None and Path(path) == outside.resolve() and unknown is None
+
+
+@pytest.mark.asyncio
+async def test_a_repo_outside_the_workspace_prompts_through_real_dispatch(tmp_path):
+    """Review #2 finding 1, at the REAL dispatch path: with the tool
+    enabled, a bb_merge call on a repo outside the workspace must prompt
+    for the workspace boundary — not fall through to ALLOW."""
+    from prometheus.__main__ import create_tool_registry
+    from prometheus.engine.agent_loop import LoopContext, _execute_tool_call
+    from prometheus.permissions.checker import SecurityGate
+
+    outside = tmp_path / "outside" / "repo"
+    outside.mkdir(parents=True)
+    _git(outside, "init", "-q", "-b", "main")
+    prompted: list = []
+    gate = SecurityGate(workspace_root=[str(tmp_path / "ws")])
+
+    async def prompt(tool_name, reason):
+        prompted.append(reason)
+        return False  # refuse — nothing should run
+
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    # daemon.py registers bb_merge only when the gate key is literally true
+    registry = create_tool_registry({}, gate)
+    registry.register(BbMergeTool())
+    ctx = LoopContext(
+        provider=None, model="t", system_prompt="", max_tokens=512,
+        tool_registry=registry,
+        permission_checker=gate, permission_prompt=prompt,
+        cwd=str(tmp_path / "ws"),
+    )
+    await _execute_tool_call(ctx, "bb_merge", "t1", {
+        "repo": str(outside), "branch": "bb/m1/i1/a", "into": "bb/m1/integrate",
+        "item_id": "m1.i1", "intent": {"what": "x", "why": "y"},
+    })
+    assert prompted, "bb_merge wrote outside the workspace WITHOUT prompting"
+    assert any("outside workspace" in r for r in prompted), prompted
+
+
+@pytest.mark.asyncio
+async def test_a_green_record_for_a_never_landed_merge_does_not_satisfy_a_dependency(repo, tool, ctx):
+    """Review #2: the record is written BEFORE the CAS advance. A refused
+    advance leaves a green record for a merge that never landed — the
+    dependent must STILL be refused (green AND landed, ancestry check)."""
+    # a commit that is NOT on the integration branch (the refused merge)
+    _git(repo, "checkout", "-q", "-b", "bb/m1/i1/ghost")
+    (repo / "ghost.txt").write_text("never landed\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "the merge that never advanced the ref")
+    ghost = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "main")
+    # green record whose tree is the ghost commit — green but NOT landed
+    _board_result(repo, "m1", "m1.i1", exit_code=0, tree=ghost)
+    _worker_branch(repo, "bb/m1/i2/agent-a", "f.txt", "work\n")
+    res = await tool.execute(_args(repo, branch="bb/m1/i2/agent-a", item_id="m1.i2",
+                                 depends_on=["m1.i1"], mission="m1"), ctx)
+    assert res.is_error
+    assert "m1.i1" in res.output
+    assert _git(repo, "rev-parse", "bb/m1/integrate") == _git(repo, "rev-parse", "main")
+
+
+@pytest.mark.asyncio
+async def test_the_refused_advance_case_end_to_end(repo, tool, ctx):
+    """The exact scenario: merge A green but the ref moved mid-check (CAS
+    refuses); then a dependent merge B must be refused — A's green record
+    is on the board but A never landed."""
+    _worker_branch(repo, "bb/m1/i1/agent-a", "a.txt", "a\n")
+    import unittest.mock as mock
+
+    import prometheus.tools.builtin.bb_merge as bm
+
+    real_git = bm._git
+    moved = {"done": False}
+
+    def racing_git(r, *args):
+        # right before the final CAS update-ref of the integration branch,
+        # a concurrent writer advances it — the CAS must refuse
+        if (args[:1] == ("update-ref",) and len(args) > 1
+                and args[1] == "refs/heads/bb/m1/integrate" and not moved["done"]):
+            moved["done"] = True
+            _git(r, "checkout", "-q", "bb/m1/integrate")
+            (r / "concurrent.txt").write_text("other writer\n")
+            _git(r, "add", ".")
+            _git(r, "commit", "-q", "-m", "concurrent advance")
+            _git(r, "checkout", "-q", "main")
+        return real_git(r, *args)
+
+    with mock.patch.object(bm, "_git", racing_git):
+        res = await tool.execute(_args(repo), ctx)
+    assert res.is_error
+    body = json.loads(res.output)
+    assert body["merged"] is False
+    assert "moved during the check" in body["acceptance"]
+    # A's green record IS on the board (written before the CAS)
+    recs = _git(repo, "ls-tree", "-r", "--name-only", "refs/blackboard/m1",
+                "--", "results/merged/m1.i1/").splitlines()
+    assert recs, "the green record should exist even though the advance was refused"
+    # now the dependent: must be REFUSED — green but not landed
+    _worker_branch(repo, "bb/m1/i2/agent-a", "b.txt", "b\n")
+    res2 = await tool.execute(_args(repo, branch="bb/m1/i2/agent-a", item_id="m1.i2",
+                                  depends_on=["m1.i1"], mission="m1"), ctx)
+    assert res2.is_error
+    assert "m1.i1" in res2.output
