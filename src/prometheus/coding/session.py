@@ -142,6 +142,7 @@ class CodingSession:
         control_dir: str | None = None,  # Loop Manager Sprint 2 — mid-run control (off if None)
         training_config: dict[str, Any] | None = None,
         coding_run_id: str | None = None,
+        branch_suffix: str = "",
     ) -> None:
         self._provider = provider
         self._model = model
@@ -163,7 +164,12 @@ class CodingSession:
             max_wall_seconds=max_wall_seconds,
         )
         self._registry = build_coding_registry(sandbox)
-        self._branch = f"coding/{task.task_id}"
+        # The branch this run's work lands on. ``branch_suffix`` makes it
+        # unique per run when the checkout is a WORKTREE of the source repo
+        # (worktree_per_run): worktrees share the source's refs, so two runs
+        # on one source must not share a branch name. The clone path passes
+        # nothing and keeps the historical coding/<task_id> exactly.
+        self._branch = f"coding/{task.task_id}{branch_suffix}"
         # Telemetry v2 (WP-X.54 T-3, ruling 5): each episode is one turn, and
         # every one of them carries this run's id. The runner passes the
         # sandbox instance id; a caller that passes none still gets an id

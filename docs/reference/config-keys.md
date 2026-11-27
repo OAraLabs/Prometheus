@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **473** of
+Every key in `config/prometheus.yaml.default` — **474** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -280,6 +280,7 @@ none either — the key is documented so its absence is visible.
 | `coding` | *(section)* |
 | `coding.enabled` | `False` |
 | `coding.sandbox_type` | `process` |
+| `coding.worktree_per_run` | `False` |
 | `coding.sandbox_dir` | `~/.prometheus/coding/sandboxes/` |
 | `coding.max_task_duration_minutes` | `120` |
 | `coding.max_iterations` | `50` |

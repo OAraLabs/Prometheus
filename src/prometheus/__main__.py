@@ -1249,6 +1249,17 @@ def run_coding_task(args) -> int:
     # threaded to this call is a setting that silently does nothing.
     coding_cfg = config.get("coding", {}) or {}
     sandbox_backend = str(coding_cfg.get("sandbox_type", "process"))
+    # Worktree per run (experimental, blackboard protocol §5): the run gets
+    # its own checkout of the source repo, removed when the run completes.
+    # Off (the shipped default) keeps the full-clone behavior exactly as it
+    # was. The branch still lives in the checkout either way; the report's
+    # sandbox_root names it, and the caller merges from there.
+    worktree_per_run = coding_cfg.get("worktree_per_run", False) is True
+    # A worktree shares the source's refs; two runs on one source must not
+    # share a checkout OR a branch name. The clone path already tolerates a
+    # reused task id (its own clone, its own refs); the worktree path makes
+    # the per-run branch unique the same way the sandbox instance id is.
+    branch_suffix = f"-{_uuid4().hex[:8]}" if worktree_per_run else ""
     # The model's commands in this run (code_run, and the acceptance command
     # that runs its code) go behind the bash tool's floors — the security
     # section of THIS config, not whatever a default path search finds.
@@ -1263,6 +1274,7 @@ def run_coding_task(args) -> int:
             task_id=sandbox_instance_id,
             network_isolation=bool(coding_cfg.get("network_isolation", False)),
             image=coding_cfg.get("docker_image") or None,
+            worktree=worktree_per_run,
         )
     except Exception as exc:
         # A requested-but-unavailable backend raises rather than degrading, so
@@ -1312,6 +1324,7 @@ def run_coding_task(args) -> int:
         # Telemetry v2: the run every episode's turn belongs to. The instance
         # id, not the task id, which a caller may reuse (audit Q2).
         coding_run_id=sandbox_instance_id,
+        branch_suffix=branch_suffix,
     )
     # A coding run must ALWAYS emit a JSON report and a verdict exit code —
     # an uncaught exception mid-run (a model-output edge case, a provider
@@ -1360,6 +1373,38 @@ def run_coding_task(args) -> int:
                 file=sys.stderr,
             )
             _tb2.print_exc()
+        # Worktree per run: remove the checkout when the run completes, on
+        # EVERY exit path (this finally is the same one that releases the
+        # sandbox). Uncommitted work is NEVER discarded: remove_run_worktree
+        # first commits any dirty state as a WIP commit on the branch the
+        # worktree is on (the run's branch; a failed/stopped/timed-out run
+        # may not have reached the session's artifact commit) and names the
+        # branch here; if it cannot save the work, the checkout is left in
+        # place. Never fatal: a cleanup failure must not replace the run's
+        # verdict.
+        if worktree_per_run:
+            from prometheus.coding.sandbox import remove_run_worktree
+            try:
+                removed, wip_branch = remove_run_worktree(args.repo, sandbox.root)
+                if wip_branch:
+                    print(
+                        f"note: uncommitted work preserved as a WIP commit on "
+                        f"branch {wip_branch} in the source repo",
+                        file=sys.stderr,
+                    )
+                if not removed:
+                    print(
+                        f"warning: run worktree left in place at {sandbox.root} "
+                        f"(cleanup refused or work could not be saved)",
+                        file=sys.stderr,
+                    )
+            except Exception:  # noqa: BLE001 — reported, never fatal
+                import traceback as _tb3
+                print(
+                    f"warning: worktree cleanup failed for task {task_id} at {sandbox.root}",
+                    file=sys.stderr,
+                )
+                _tb3.print_exc()
 
 
 # ---------------------------------------------------------------------------
