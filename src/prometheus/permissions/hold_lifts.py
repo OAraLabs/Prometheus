@@ -31,6 +31,7 @@ from prometheus.permissions.approval_queue import (
     PendingAction,
     _humanise_window,
     is_hold_request,
+    is_worker_request,
     new_request_id,
 )
 from prometheus.permissions.approver import Approver
@@ -130,10 +131,12 @@ class HoldLiftChannel(ApprovalQueue):
         action = self.pending.get(request_id)
         if action is None:
             return False
-        if not is_hold_request(action):
-            # Not a hold lift: something else was filed in this queue (a worker's request, when nothing else is the
-            # surface's first queue). The person check is for lifting a hold; this request is answered under its own
-            # rules (a worker's: a device token, ``approve_action``), so the base queue answers it.
+        if is_worker_request(action) and not is_hold_request(action) and getattr(action, "task_id", None) is None:
+            # POSITIVELY a worker-ONLY request (worker_task_id, set only by /api/workers/approvals, and NO
+            # desktop/hold marker): answered under its own rules (a device token, ``approve_action``), so the
+            # base queue answers it. Anything ELSE keeps the person check — a hold lift filed without its
+            # device marker must fail CLOSED, and a request carrying BOTH the worker marker and a desktop/hold
+            # marker keeps the check too (review #2 hardening nit).
             return await super().approve(request_id, by=by, scope=scope, grant=grant)
         if (scope not in (None, SCOPE_ONCE)) or grant is not None:
             raise OnceOnly("A hold lift can only be approved once: nothing is remembered.")

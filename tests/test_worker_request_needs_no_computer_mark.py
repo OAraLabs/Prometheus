@@ -185,3 +185,89 @@ async def test_a_desktop_prompt_still_needs_a_person_marked_for_it(tmp_path):
     with pytest.raises(NotAPerson):
         await w.channel.approve("de5c70b1", by=by)
     assert "de5c70b1" in w.channel.pending
+
+
+# ── review #2 follow-up: the skip is POSITIVE worker marking, fail closed ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_desktop_prompt_missing_its_task_id_still_needs_a_person(tmp_path):
+    """The fail-open the review found: a desktop prompt filed WITHOUT its
+    task_id is not positively a worker request, so the person check must
+    still run — a missing marker fails CLOSED."""
+    from prometheus.computer.door import NotAPerson
+    from prometheus.permissions import approver
+
+    w = World(tmp_path, "computer")
+    action = PendingAction(request_id="fa110pen", tool_name="computer_click",
+                           description="click", once_only=True)  # no task_id, no worker_task_id
+    w.channel._register(action)
+    by = approver.Approver(kind=approver.DEVICE, id=w.owner["id"])
+    with pytest.raises(NotAPerson):
+        await w.channel.approve("fa110pen", by=by)
+    assert "fa110pen" in w.channel.pending
+
+
+@pytest.mark.asyncio
+async def test_a_hold_lift_missing_its_device_marker_still_needs_a_person(tmp_path):
+    from prometheus.computer.door import NotAPerson
+    from prometheus.permissions import approver
+
+    w = World(tmp_path, "default")
+    action = PendingAction(request_id="fa110pen", tool_name="device_hold",
+                           description="lift", once_only=True)  # no hold_device_id
+    w.hold._register(action)
+    by = approver.Approver(kind=approver.DEVICE, id=w.owner["id"])
+    with pytest.raises(NotAPerson):
+        await w.hold.approve("fa110pen", by=by)
+    assert "fa110pen" in w.hold.pending
+
+
+@pytest.mark.asyncio
+async def test_an_unmarked_ordinary_request_in_a_channel_still_needs_a_person(tmp_path):
+    """Anything not POSITIVELY a worker request keeps the check — the skip
+    is a whitelist of one marker, not a blacklist of two."""
+    from prometheus.computer.door import NotAPerson
+    from prometheus.permissions import approver
+
+    w = World(tmp_path, "computer")
+    action = PendingAction(request_id="0rd1nary", tool_name="write_file",
+                           description="write", once_only=True, session_id="beacon:abc")
+    w.channel._register(action)
+    by = approver.Approver(kind=approver.DEVICE, id=w.owner["id"])
+    with pytest.raises(NotAPerson):
+        await w.channel.approve("0rd1nary", by=by)
+
+
+@pytest.mark.asyncio
+async def test_worker_marker_plus_desktop_marker_keeps_the_person_check(tmp_path):
+    """Review #2 hardening nit: BOTH markers → the person check stays.
+    The skip is for worker-ONLY requests."""
+    from prometheus.computer.door import NotAPerson
+    from prometheus.permissions import approver
+
+    w = World(tmp_path, "computer")
+    action = PendingAction(request_id="b0thmark", tool_name="computer_click",
+                           description="click", task_id="t1", worker_task_id="a053720bf",
+                           once_only=True)
+    w.channel._register(action)
+    by = approver.Approver(kind=approver.DEVICE, id=w.owner["id"])
+    with pytest.raises(NotAPerson):
+        await w.channel.approve("b0thmark", by=by)
+    assert "b0thmark" in w.channel.pending
+
+
+@pytest.mark.asyncio
+async def test_worker_marker_plus_hold_marker_keeps_the_person_check(tmp_path):
+    from prometheus.computer.door import NotAPerson
+    from prometheus.permissions import approver
+
+    w = World(tmp_path, "default")
+    action = PendingAction(request_id="b0thmark", tool_name="device_hold",
+                           description="lift", hold_device_id="dev1", worker_task_id="a053720bf",
+                           once_only=True)
+    w.hold._register(action)
+    by = approver.Approver(kind=approver.DEVICE, id=w.owner["id"])
+    with pytest.raises(NotAPerson):
+        await w.hold.approve("b0thmark", by=by)
+    assert "b0thmark" in w.hold.pending
