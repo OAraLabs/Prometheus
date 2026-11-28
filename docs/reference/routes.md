@@ -9,7 +9,7 @@ app. For what each one is *for*, see the curated
 [API guide](../guide/api.md) — this file is the complete list, that
 one is the explanation.
 
-## Daemon app — 150 paths
+## Daemon app — 151 paths
 
 | Path | Methods |
 |---|---|
@@ -139,6 +139,7 @@ one is the explanation.
 | `/api/soul` | GET |
 | `/api/speech` | GET |
 | `/api/speech/event` | POST |
+| `/api/speech/settings` | GET, PUT |
 | `/api/speech/speak` | POST |
 | `/api/speech/transcribe` | POST |
 | `/api/status` | GET |
