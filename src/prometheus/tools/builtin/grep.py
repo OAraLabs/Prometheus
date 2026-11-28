@@ -23,6 +23,10 @@ from prometheus.tools.denied_prune import (
     withheld_note,
 )
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
+from prometheus.tools import tree_walk
+
+#: Files larger than this are skipped rather than read whole into memory.
+MAX_FILE_BYTES = 10 * 1024 * 1024
 
 
 class GrepToolInput(BaseModel):
@@ -100,39 +104,70 @@ class GrepTool(BaseTool):
         matches: list[str] = []
 
         withheld = 0
-        for path in sorted(root.glob(file_glob)):
-            if len(matches) >= arguments.limit:
-                break
-            if not path.is_file():
-                continue
-            if is_denied(path, self._denied):
-                withheld += 1
-                continue
-            # Read through no link (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q): the name the glob listed may lead
-            # elsewhere by now, and a second name for a protected file is not read.
-            real = path.resolve()
-            if real != path and is_denied(real, self._denied):
-                withheld += 1
-                continue
+        too_big = 0
+        stats = tree_walk.WalkStats()
+        # Streamed, pruned and capped (tools/tree_walk.py): this used to be
+        # ``sorted(root.glob(file_glob))``, which built every path under root
+        # before reading one file — 5.8 million Path objects for a "**/*" over
+        # ~/projects, and a daemon that grew to 42 GB.
+        try:
+            # ripgrep, when installed, does the LISTING (fast, honours
+            # .gitignore); every file is still opened below, through the same
+            # denied-path and no-link checks either way.
+            rg = tree_walk.ripgrep()
+            paths = tree_walk.walk_files_rg(rg, root, file_glob, stats=stats) if rg else None
+            if paths is None:
+                paths = tree_walk.walk(root, file_glob, stats=stats)
             try:
-                raw = safe_fs.read_bytes(real)
-            except OSError:  # safe_fs.PathChanged included
-                continue
-            if b"\x00" in raw:
-                continue
-            text = raw.decode("utf-8", errors="replace")
-            for line_no, line in enumerate(text.splitlines(), start=1):
-                if pattern.search(line):
-                    try:
-                        shown = path.relative_to(root)
-                    except ValueError:
-                        shown = path
-                    matches.append(f"{shown}:{line_no}:{line}")
+                for path in paths:
                     if len(matches) >= arguments.limit:
                         break
+                    if not path.is_file():
+                        continue
+                    if is_denied(path, self._denied):
+                        withheld += 1
+                        continue
+                    # Read through no link (security/safe_fs.py, GHSA-wgcv-xw9m-9q9q): the name the glob listed may lead
+                    # elsewhere by now, and a second name for a protected file is not read.
+                    real = path.resolve()
+                    if real != path and is_denied(real, self._denied):
+                        withheld += 1
+                        continue
+                    try:
+                        if real.stat().st_size > MAX_FILE_BYTES:
+                            too_big += 1
+                            continue
+                        raw = safe_fs.read_bytes(real)
+                    except OSError:  # safe_fs.PathChanged included
+                        continue
+                    if b"\x00" in raw:
+                        continue
+                    text = raw.decode("utf-8", errors="replace")
+                    for line_no, line in enumerate(text.splitlines(), start=1):
+                        if pattern.search(line):
+                            try:
+                                shown = path.relative_to(root)
+                            except ValueError:
+                                shown = path
+                            matches.append(f"{shown}:{line_no}:{line}")
+                            if len(matches) >= arguments.limit:
+                                break
+            finally:
+                # Stop the listing now (and a ripgrep child with it), not at GC.
+                close = getattr(paths, "close", None)
+                if close is not None:
+                    close()
+        except tree_walk.PatternError as exc:
+            return ToolResult(output=f"file_glob {arguments.file_glob!r}: {exc}", is_error=True)
 
-        note = withheld_note(withheld)
+        note = withheld_note(withheld) + tree_walk.walk_note(
+            stats, limit_hit=len(matches) >= arguments.limit, limit=arguments.limit,
+        )
+        if too_big:
+            note += f"\n({too_big} file(s) over {MAX_FILE_BYTES // (1024 * 1024)} MB not searched)"
         if not matches:
+            if stats.ripgrep:
+                note += tree_walk.RIPGREP_MISS_NOTE
             return ToolResult(output="(no matches)" + note)
         return ToolResult(output="\n".join(matches) + note)
 
