@@ -7,8 +7,11 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
+
+pytest.importorskip("fastapi")
+
+import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
