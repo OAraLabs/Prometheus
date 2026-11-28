@@ -7495,6 +7495,18 @@ def create_app(
 
     register_git_routes(app, config=config, conversation_store=_conversation_store)
 
+    # ── Extensions: out-of-process companion services (OAra Gym, OAra Voice; docs/design/extension-hooks.md) ──
+    # Operator only (web/route_access.py); read and control URLs stay strictly separated.
+    from prometheus.web.extension_routes import register_extension_routes
+
+    register_extension_routes(
+        app,
+        config=config,
+        telemetry_db_path=lambda: (
+            Path(getattr(telemetry, "db_path", DEFAULT_DB_PATH)) if telemetry is not None else None
+        ),
+    )
+
     # ── Static files (must be last — catch-all) ─────────────────────
 
     if static_dir:

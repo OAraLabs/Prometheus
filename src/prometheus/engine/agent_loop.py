@@ -2460,12 +2460,19 @@ async def _run_loop(
         # the provider constrains output to valid tool-call JSON (or prose).
         # Sending tools in the payload would make llama.cpp drop the grammar
         # (see LlamaCppProvider._build_request_payload), so we withhold them at
-        # tier full only. tier light (native + --jinja) and tier off (cloud)
-        # are unchanged — they send tools and use no grammar.
+        # tier full ONLY when the provider actually has a grammar wired (or is a
+        # non-LlamaCpp mock without a `has_grammar` attribute). For a session
+        # override to a local LlamaCppProvider whose grammar was never wired,
+        # keep native `tools` so the request never goes out with neither tools
+        # nor grammar (Bug B1).
         _payload_tools = active_tools
         if (
             context.adapter is not None
             and getattr(context.adapter, "tier", None) == "full"
+            and (
+                not hasattr(context.provider, "has_grammar")
+                or bool(context.provider.has_grammar)
+            )
         ):
             _payload_tools = []
 

@@ -313,6 +313,12 @@ OPERATOR_ONLY: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/api/tasks"),
     ("GET", "/api/tasks/{task_id}"),
     ("POST", "/api/tasks/{task_id}/stop"),
+    # /api/extensions (out-of-process Extensions: OAra Gym, OAra Voice — operator only)
+    ("GET", "/api/extensions"),
+    ("GET", "/api/extensions/traces/export"),
+    ("GET", "/api/extensions/{name}/status"),
+    ("POST", "/api/extensions/{name}/control/intent"),
+    ("POST", "/api/extensions/{name}/control/confirm"),
     # /api/telemetry
     ("GET", "/api/telemetry"),
     # /api/tools
