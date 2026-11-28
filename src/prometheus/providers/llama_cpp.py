@@ -202,6 +202,11 @@ class LlamaCppProvider(ModelProvider):
         self._grammar_tool_schemas: list[dict[str, Any]] | None = None
         self._derived_grammars: dict[str, str] = {}  # "required" | "tool:<name>"
 
+    @property
+    def has_grammar(self) -> bool:
+        """True when a GBNF grammar is wired onto this provider instance."""
+        return bool(self._grammar)
+
     async def verify_thinking_suppression(self) -> tuple[str, str]:
         """Measure whether ``suppress_thinking`` ACTUALLY suppresses thinking.
 
