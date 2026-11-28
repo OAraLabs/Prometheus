@@ -20,6 +20,7 @@ import pytest
 
 from prometheus.tools.base import ToolExecutionContext
 from prometheus.tools.builtin.file_read import FileReadTool, FileReadToolInput
+from prometheus.tools import tree_walk
 from prometheus.tools.builtin.glob import GlobTool, GlobToolInput
 from prometheus.tools.builtin.grep import GrepTool, GrepToolInput
 
@@ -75,7 +76,8 @@ def _slow(monkeypatch, target, attr):
 
 @pytest.mark.asyncio
 async def test_grep_does_not_freeze_the_loop(tree, monkeypatch):
-    _slow(monkeypatch, Path, "glob")
+    monkeypatch.setattr(tree_walk, "ripgrep", lambda: None)  # time the Python walk
+    _slow(monkeypatch, tree_walk, "walk")  # the walk both tools stream from
     ctx = ToolExecutionContext(cwd=tree)
     result, ticks = await _run_while_ticking(
         GrepTool().execute(GrepToolInput(pattern="BaseTool", file_glob="*.py"), ctx)
@@ -89,7 +91,8 @@ async def test_grep_does_not_freeze_the_loop(tree, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_glob_does_not_freeze_the_loop(tree, monkeypatch):
-    _slow(monkeypatch, Path, "glob")
+    monkeypatch.setattr(tree_walk, "ripgrep", lambda: None)  # time the Python walk
+    _slow(monkeypatch, tree_walk, "walk")  # the walk both tools stream from
     ctx = ToolExecutionContext(cwd=tree)
     result, ticks = await _run_while_ticking(
         GlobTool().execute(GlobToolInput(pattern="*.py"), ctx)

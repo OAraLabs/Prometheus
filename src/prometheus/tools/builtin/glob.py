@@ -20,6 +20,7 @@ from prometheus.tools.denied_prune import (
     withheld_note,
 )
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
+from prometheus.tools import tree_walk
 # The one owner of absolute-glob splitting (#134) — imported rather than
 # copied, so the two sibling tools cannot drift apart again.
 from prometheus.tools.builtin.grep import _split_absolute_glob
@@ -77,14 +78,31 @@ class GlobTool(BaseTool):
         # re-encode. Split it into (anchor dir, relative pattern) with the
         # one helper that already owns this logic.
         root, pattern = _split_absolute_glob(root, arguments.pattern)
-        found = list(root.glob(pattern))
-        allowed = [p for p in found if not is_denied(p, self._denied)]
-        withheld = len(found) - len(allowed)
+        # Streamed, pruned and capped (tools/tree_walk.py): this used to be
+        # ``list(root.glob(pattern))`` with the limit applied afterwards, so a
+        # "**/*" over a big workspace built millions of paths to return 200.
+        stats = tree_walk.WalkStats()
+        allowed: list[Path] = []
+        withheld = 0
+        limit_hit = False
+        try:
+            for p in tree_walk.walk(root, pattern, stats=stats):
+                if is_denied(p, self._denied):
+                    withheld += 1
+                    continue
+                if len(allowed) >= arguments.limit:
+                    limit_hit = True
+                    break
+                allowed.append(p)
+        except tree_walk.PatternError as exc:
+            return ToolResult(output=f"pattern {arguments.pattern!r}: {exc}", is_error=True)
         matches = sorted(str(p.relative_to(root)) for p in allowed)
-        note = withheld_note(withheld)
+        note = withheld_note(withheld) + tree_walk.walk_note(
+            stats, limit_hit=limit_hit, limit=arguments.limit,
+        )
         if not matches:
             return ToolResult(output="(no matches)" + note)
-        return ToolResult(output="\n".join(matches[: arguments.limit]) + note)
+        return ToolResult(output="\n".join(matches) + note)
 
 
 def _resolve_path(base: Path, candidate: str | None) -> Path:
